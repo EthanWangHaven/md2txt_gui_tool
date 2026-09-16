@@ -1,0 +1,12 @@
+# 构建产物（45MB，不建议进仓库）
+md2txt_gui.exe
+build/
+dist/
+*.spec
+
+# 运行时个人配置（含输入内容记忆）
+config.json
+
+# Python
+__pycache__/
+*.pyc
