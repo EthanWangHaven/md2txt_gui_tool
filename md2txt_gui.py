@@ -38,7 +38,7 @@ try:
     from docx import Document
     from docx.enum.text import WD_ALIGN_PARAGRAPH
     from docx.oxml import parse_xml
-    from docx.oxml.ns import nsdecls
+    from docx.oxml.ns import nsdecls, qn
     from docx.shared import Pt, RGBColor
     _HAS_WORDCOM = True
 except ImportError:
@@ -638,17 +638,30 @@ def _docx_fill_line(p, line, store, bold=False):
         add_text(frag[last:], fmt)
 
 
-def md_to_docx(md):
+def _set_style_font(st, name, size_pt, bold):
+    """样式设置字体：西文 + 中文字体（eastAsia）、字号、加粗"""
+    st.font.name = name          # ascii/hAnsi 西文字体
+    st.font.size = Pt(size_pt)
+    st.font.bold = bold
+    rpr = st.element.get_or_add_rPr()
+    rpr.get_or_add_rFonts().set(qn('w:eastAsia'), name)  # 中文字体
+
+
+def md_to_docx(md, font='等线', size=12, bold=False):
     """Markdown → docx 文档：公式为 OMML 公式对象、表格为真表格、标题用 Heading 样式、
-    代码块等宽灰底；默认段落格式：单倍行距、段前段后 0 磅（粘进 OneNote/Word 即紧凑排版）"""
+    代码块等宽灰底；默认段落格式：单倍行距、段前段后 0 磅（粘进 OneNote/Word 即紧凑排版）
+    font/size/bold：正文字体、字号（磅）、是否加粗（公式除外全局生效）"""
     blocks, store = _convert(md)
     doc = Document()
-    # Normal 样式：单倍行距、段前段后 0 磅（对所有段落生效，含表格内）
+    # Normal 样式：单倍行距、段前段后 0 磅（对所有段落生效，含表格内）+ 全局字体设置
     pf = doc.styles['Normal'].paragraph_format
     pf.space_before = Pt(0)
     pf.space_after = Pt(0)
     pf.line_spacing = 1
-    # Heading 样式：同样紧凑，颜色改黑（默认蓝色在笔记里太扎眼）
+    _set_style_font(doc.styles['Normal'], font, size, bold)
+    # Heading 样式：同样紧凑，颜色改黑（默认蓝色在笔记里太扎眼）；
+    # 字号随正文设置放大（H1-H3 递减区分层级），加粗跟随全局设置
+    head_sizes = (size + 6, size + 4, size + 2, size, size, size)
     for lv in range(1, 7):
         try:
             st = doc.styles[f'Heading {lv}']
@@ -657,6 +670,7 @@ def md_to_docx(md):
         st.paragraph_format.space_before = Pt(0)
         st.paragraph_format.space_after = Pt(0)
         st.font.color.rgb = RGBColor(0, 0, 0)
+        _set_style_font(st, font, head_sizes[lv - 1], bold)
     prev_table = False
     prev_blank = False
     for b in blocks:
@@ -675,7 +689,7 @@ def md_to_docx(md):
             for i, r in enumerate(rows):
                 for j, cell in enumerate(r):
                     p = table.rows[i].cells[j].paragraphs[0]
-                    _docx_fill_line(p, cell, store, bold=(i == 0))
+                    _docx_fill_line(p, cell, store)  # 表头不再特判加粗，跟随全局设置
                     if aligns and j < len(aligns) and aligns[j] != 'left':
                         p.alignment = (WD_ALIGN_PARAGRAPH.CENTER
                                        if aligns[j] == 'center'
@@ -766,9 +780,9 @@ def _copy_via_word(docx_path, resident=False):
                 raise
 
 
-def copy_md_via_word(md, resident=False):
+def copy_md_via_word(md, resident=False, font='等线', size=12, bold=False):
     """Markdown → docx（OMML 公式 + 真表格）→ Word 全选复制进剪贴板"""
-    doc = md_to_docx(md)
+    doc = md_to_docx(md, font=font, size=size, bold=bold)
     fd, path = tempfile.mkstemp(suffix='.docx')
     os.close(fd)
     try:
@@ -782,8 +796,9 @@ def copy_md_via_word(md, resident=False):
 
 
 # ---------------- Windows 剪贴板（CF_HTML 富文本） ----------------
-def _set_clipboard_html(html_fragment, plain_text):
-    """把 HTML（内嵌 OMML 公式、真表格）和纯文本同时写入剪贴板"""
+def _set_clipboard_html(html_fragment, plain_text, font='等线', size=12, bold=False):
+    """把 HTML（内嵌 OMML 公式、真表格）和纯文本同时写入剪贴板；
+    font/size/bold 作为粘贴产物的全局默认字体设置"""
     user32 = ctypes.windll.user32
     kernel32 = ctypes.windll.kernel32
     user32.RegisterClipboardFormatW.restype = wintypes.UINT
@@ -796,10 +811,13 @@ def _set_clipboard_html(html_fragment, plain_text):
     user32.SetClipboardData.restype = ctypes.c_void_p
     user32.SetClipboardData.argtypes = [wintypes.UINT, ctypes.c_void_p]
 
+    body_style = (f'style="font-family:\'{font}\';font-size:{size}pt;'
+                  + ('font-weight:bold;' if bold else '') + '"')
     cf_html = user32.RegisterClipboardFormatW('HTML Format')
     header = ('Version:0.9\r\nStartHTML:{:010d}\r\nEndHTML:{:010d}\r\n'
               'StartFragment:{:010d}\r\nEndFragment:{:010d}\r\n')
-    pre = '<html><head><meta charset="utf-8"></head><body>\r\n<!--StartFragment-->'
+    pre = (f'<html><head><meta charset="utf-8"></head>'
+           f'<body {body_style}>\r\n<!--StartFragment-->')
     post = '<!--EndFragment-->\r\n</body></html>'
 
     frag = html_fragment.encode('utf-8')
@@ -929,6 +947,10 @@ class App:
         else:
             root.geometry('1150x680')
         self.var_word_keep = tk.BooleanVar(value=bool(cfg.get('word_keep')))
+        # 转换后（粘贴产物）的默认字体设置：等线 / 12 磅（小四）/ 不加粗
+        self.var_font = tk.StringVar(value=str(cfg.get('font') or '等线'))
+        self.var_font_size = tk.StringVar(value=str(cfg.get('font_size') or 12))
+        self.var_font_bold = tk.BooleanVar(value=bool(cfg.get('font_bold')))
 
         # 文件菜单：打开 / 保存输入 / 保存结果
         menubar = tk.Menu(root)
@@ -940,6 +962,10 @@ class App:
         file_menu.add_command(label='保存结果为纯文本…',
                               command=self.save_result)
         menubar.add_cascade(label='文件', menu=file_menu)
+        # 设置菜单：粘贴产物的默认字体
+        set_menu = tk.Menu(menubar, tearoff=0)
+        set_menu.add_command(label='粘贴字体…', command=self.open_settings)
+        menubar.add_cascade(label='设置', menu=set_menu)
         root.config(menu=menubar)
         root.bind('<Control-o>', lambda e: self.open_file())
         root.bind('<Control-s>', lambda e: self.save_input())
@@ -1084,6 +1110,9 @@ class App:
             'text': self.in_tb.get('1.0', 'end-1c'),
             'geometry': self.root.geometry(),
             'word_keep': self.var_word_keep.get(),
+            'font': self.var_font.get(),
+            'font_size': self._font_size_val(),
+            'font_bold': self.var_font_bold.get(),
         })
         _release_word()
         self.root.destroy()
@@ -1181,6 +1210,57 @@ class App:
         if not self.var_word_keep.get():
             _release_word()
 
+    def _font_size_val(self):
+        """字号设置的数值（非法输入回退 12 磅）"""
+        try:
+            return float(self.var_font_size.get())
+        except ValueError:
+            return 12
+
+    def open_settings(self):
+        """设置粘贴产物的默认字体：中文字体 / 字号 / 是否加粗"""
+        backup = (self.var_font.get(), self.var_font_size.get(),
+                  self.var_font_bold.get())
+        win = tk.Toplevel(self.root)
+        win.title('粘贴字体设置')
+        win.resizable(False, False)
+        win.transient(self.root)
+        body = ttk.Frame(win, padding=12)
+        body.pack(fill='both', expand=True)
+        ttk.Label(body, text='中文字体：').grid(row=0, column=0, sticky='w', pady=4)
+        ttk.Combobox(body, textvariable=self.var_font, width=18,
+                     values=('等线', '宋体', '微软雅黑', '黑体', '楷体', '仿宋',
+                             'Segoe UI', 'Calibri', 'Arial', 'Times New Roman')
+                     ).grid(row=0, column=1, sticky='w', pady=4)
+        ttk.Label(body, text='字号（磅，12=小四）：').grid(
+            row=1, column=0, sticky='w', pady=4)
+        ttk.Combobox(body, textvariable=self.var_font_size, width=8,
+                     values=('9', '10.5', '11', '12', '14', '16', '18',
+                             '22', '24', '28')).grid(row=1, column=1, sticky='w', pady=4)
+        ttk.Label(body, text='正文加粗：').grid(row=2, column=0, sticky='w', pady=4)
+        ttk.Checkbutton(body, text='转换后的文本默认加粗（公式除外）',
+                        variable=self.var_font_bold).grid(
+            row=2, column=1, sticky='w', pady=4)
+        ttk.Label(body, foreground='#666',
+                  text='对「公式可编辑」「公式为图片」两种复制的粘贴效果生效；'
+                       '标题随字号放大，行内 **粗体** 标记不受影响'
+                  ).grid(row=3, column=0, columnspan=2, sticky='w', pady=(6, 0))
+        btns = ttk.Frame(body)
+        btns.grid(row=4, column=0, columnspan=2, sticky='e', pady=(10, 0))
+        ttk.Button(btns, text='确定',
+                   command=win.destroy).pack(side='left', padx=4)
+        ttk.Button(btns, text='取消',
+                   command=lambda: self._restore_settings(backup, win)
+                   ).pack(side='left')
+        win.grab_set()
+
+    def _restore_settings(self, backup, win):
+        """设置对话框取消：还原修改前的值"""
+        self.var_font.set(backup[0])
+        self.var_font_size.set(backup[1])
+        self.var_font_bold.set(backup[2])
+        win.destroy()
+
     def copy_rich(self):
         """生成 docx（OMML 公式+真表格）→ Word 后台全选复制 → 粘贴进 OneNote 即可编辑公式"""
         src = self.in_tb.get('1.0', 'end-1c')
@@ -1190,7 +1270,10 @@ class App:
         self.btn_rich.config(text='正在调用 Word…')
         self.root.update_idletasks()
         try:
-            copy_md_via_word(src, resident=self.var_word_keep.get())
+            copy_md_via_word(src, resident=self.var_word_keep.get(),
+                             font=self.var_font.get(),
+                             size=self._font_size_val(),
+                             bold=self.var_font_bold.get())
         except Exception as e:
             self._flash(self.btn_rich, f'失败:{e}', RICH_LABEL)
             return
@@ -1202,7 +1285,9 @@ class App:
         try:
             plain = md_to_text(src)
             body = md_to_html(src)
-            _set_clipboard_html(body, plain)
+            _set_clipboard_html(body, plain, font=self.var_font.get(),
+                                size=self._font_size_val(),
+                                bold=self.var_font_bold.get())
         except Exception as e:
             self._flash(self.btn_img, f'失败:{e}', IMG_LABEL)
             return
