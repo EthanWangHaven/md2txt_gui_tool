@@ -45,7 +45,7 @@ python md2txt_gui.py
 
 ```bash
 pip install pyinstaller
-pyinstaller --noconfirm --onefile --windowed --name md2txt_gui --collect-all tkinterdnd2 md2txt_gui.py
+pyinstaller --noconfirm --onefile --windowed --name md2txt_gui --collect-all tkinterdnd2 --collect-data latex2mathml md2txt_gui.py
 ```
 
 生成 `dist/md2txt_gui.exe`，单文件约 45MB，无需 Python 环境即可运行。
