@@ -34,6 +34,15 @@ Windows 桌面小工具：把 Markdown 转换成适合粘贴进 **OneNote / Word
 - 「公式可编辑」模式需要本机安装 Microsoft Word
 - 「公式为图片」模式无额外要求
 
+## 直接下载 exe（推荐）
+
+从仓库下载 `md2txt_gui.exe`（约 47MB，PyInstaller 单文件打包），放到任意目录**双击即可运行**：
+
+- **无需安装 Python** 及任何依赖，Python 解释器和全部依赖库都打包在 exe 内
+- 首次启动需几秒解压到临时目录，属正常现象
+- 「公式可编辑」模式需要目标电脑安装 Microsoft Word；没有 Word 时用「公式为图片」模式即可
+- 未签名的 exe 可能触发 Windows SmartScreen / 杀软提示，选择「仍要运行」或加入信任即可
+
 ## 安装与运行（源码方式）
 
 ```bash

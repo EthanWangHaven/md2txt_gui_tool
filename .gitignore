@@ -1,5 +1,4 @@
-# 构建产物（45MB，不建议进仓库）
-md2txt_gui.exe
+# 构建产物（md2txt_gui.exe 随仓库分发，其余不进仓库）
 build/
 dist/
 *.spec
