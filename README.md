@@ -1,8 +1,8 @@
-# md2txt_gui — Markdown 转纯文本小工具
+# MdClear — Markdown 转纯文本小工具
 
 <div align="center">
 
-<img src="app.ico" width="128" alt="md2txt_gui 图标">
+<img src="app.ico" width="128" alt="MdClear 图标">
 
 </div>
 
@@ -43,7 +43,7 @@ Windows 桌面小工具：把 Markdown 转换成适合粘贴进 **OneNote / Word
 
 ```bash
 pip install latex2mathml mathml2omml python-docx pywin32 matplotlib tkinterdnd2
-python md2txt_gui.py
+python md_clear.py
 ```
 
 依赖缺失时会自动降级（如未装 tkinterdnd2 则不可拖拽、未装 Word 组件则隐藏富文本复制），不会崩溃。
@@ -52,10 +52,10 @@ python md2txt_gui.py
 
 ```bash
 pip install pyinstaller
-pyinstaller --noconfirm --onefile --windowed --icon=app.ico --name md2txt_gui --collect-all tkinterdnd2 --collect-data latex2mathml md2txt_gui.py
+pyinstaller --noconfirm --onefile --windowed --icon=app.ico --name MdClear --collect-all tkinterdnd2 --collect-data latex2mathml md_clear.py
 ```
 
-生成 `dist/md2txt_gui.exe`，单文件约 45MB，无需 Python 环境即可运行。`app.ico` 为应用图标（窗口/任务栏图标已内嵌在源码中，替换图标时同步更新 `md2txt_gui.py` 里的 `_APP_ICON_B64`）。
+生成 `dist/MdClear.exe`，单文件约 45MB，无需 Python 环境即可运行。`app.ico` 为应用图标（窗口/任务栏图标已内嵌在源码中，替换图标时同步更新 `md_clear.py` 里的 `_APP_ICON_B64`）。
 
 ## 配置文件
 
@@ -71,14 +71,14 @@ pyinstaller --noconfirm --onefile --windowed --icon=app.ico --name md2txt_gui --
 
 ```
 md2txt_gui/
-├── md2txt_gui.py          # 主程序（单文件，含全部逻辑）
-├── md2txt_gui.exe         # 打包后的可执行文件（构建产物）
+├── md_clear.py            # 主程序（单文件，含全部逻辑）
+├── MdClear.exe            # 打包后的可执行文件（构建产物）
 ├── Markdown转换工具.lnk    # 快捷方式
 ├── config.json            # 运行时自动生成（配置/内容记忆，勿提交）
 └── README.md
 ```
 
-建议配合 `.gitignore` 排除 `md2txt_gui.exe`、`config.json`、`__pycache__/`。
+建议配合 `.gitignore` 排除 `MdClear.exe`、`config.json`、`__pycache__/`。
 
 ## 技术要点
 
