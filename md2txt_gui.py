@@ -1417,11 +1417,69 @@ class App:
         self._flash(self.btn_img, '已复制 ✓', IMG_LABEL)
 
 
+# ---------------- 应用图标 ----------------
+# 48px PNG base64：窗口标题栏/任务栏图标（exe 文件图标由 PyInstaller --icon 嵌入）
+_APP_ICON_B64 = (
+    'iVBORw0KGgoAAAANSUhEUgAAADAAAAAwCAYAAABXAvmHAAAJt0lEQVR4nNVaa2xcRxX+5nF37fWuEzty'
+    '7UQNThENCuQplTal5OEqqVD5QYhwVSEkkKL+aEBCROIHP0jaIlQhREBCSRFUICEkqrjNQylJQKC82jQk'
+    'cYUCSkITpXVCEj/it/dxHzODzty9u+t92C4otjn27N69d+7Md875zpkzd5ehTDoPGNH1HFN0/IVXR5ri'
+    'qNsIYx43RrcDJma0YWB4MGIAxhm9eozxHjB2wUXuzDvfXzhcji2SSVCiDpv29LWJeOMuAM8zLpYy7hRn'
+    'mBVh4Wzah9HqNoA3lDu29/TLrb3lShQU2LTnpDz9ckew8ZXh7ULW75fxeGuQy0EHrgGDLtN1FsTQP+cy'
+    'zmRdHQLX7VNBdueZ3U0HI6wFBQqW3z30okgs2K8DFyrIBQxMMMZmG/kkMSQwSsg6yWUcKjO68/Qrza9F'
+    'mFlnpxFdXUxt+MHQl2ViwWHlTSijFGOc89mjzHTCYLTWTAgjYkkRZEa3nf1h8xHCzmAMe/KliRbJzBXG'
+    'WbP2PcM445iHYrTR3Ikxo81QYNhn3nspOcDBmBHK/Z6sSy1SXk6BgVunzcMGBk4YCSthJuxs03eGF/qp'
+    '4CoX8VajXHLXnHJ+ejGGiTi0cvuccblCeil3sxANbdrPGErC84f3NYUZP2u4k2jzUunN0mj+BBxpNKCZ'
+    'MQL/B2IAzbnkxudPSBjTbrRilmNzJJwViav19Bww9KcVJaB2qZWOcRsk4aW5AJ/zDHK+sUo0xLk9NxUS'
+    'ukYGJ+zSkB5RlM+ycAZkXINPtkp8dqljlTj/LxdZz0BShp9GAcIuoXQxTc0y+Kxr8OgSB7/99iIk68Kl'
+    'hxT41uuDeUZU90SkAGGXIZ/CVk1qJdXp9LW3sdr30VKZdTXWL49Z8K5v4AiG9Z+OY0mTwK2BAHGH6FFD'
+    'AcIMA0lBI6byQLXTbAZKUB9de0hrL2OgVBh/ggNUvHhB6eJVfY4wXI0NeGmMgqYkSq2KKFsUVo5AnuEs'
+    '5GkpW8PPDL4Kg7JqxiHtCIAJgZb2s8cWTx59DSMRZsIuQ2UqPWCBMODnO1qwuJmybZERShvs+s193L5P'
+    'bp5sJbLiaEbjha2N2LY+aa1E56L3nx4exql/ZrGwgcPUMJqtpC3AKSiUvyBpZMunagoAWL7EQVuT1XOS'
+    'dKyqxy9PjKDOEdaSkSgF1DtA51NJLHso2ggVpTHBEQRkYZv+UIHQnpqeQjZmtQaP3FirUUqjvjQnSaBC'
+    '/m5dk0BMkjeKWYyolM5prGqPob3FoSRhhfr7+fsseJTMgSoAZ1jcEXZeyKk1Wsj1MMiIGtHnle0xLF/s'
+    '2ExiAeWzmOdrbFmTsP3o/vGstv2jVg4QVUwcMWLaRpS164B1RzGdlrZIaO6bvZ61sOWeYOhYlbAK2LiD'
+    'gR9oLEgwPL06ESoTGNy45xVA5w8mz2GqKFCS2qtiit4VUQjT1OAlMjimcHfIL3zeuq4B9THivQa39FFY'
+    '+0gcn2gJud83EuDOYNi/iL9sfPM/UIg2zWHGmkKBkgkmcgrvXskUMtGKpXGseDiGTC6klu9rPLMuWQi0'
+    'c1ezGBoPHyBEw0SUpXjhIIpWakDnIsrRcU18lNnodWoPFCeglfH4pXF7TB6kCbasbUDOUzY4F6UEOlY3'
+    'FCh34tJYgfcl5rVjkjGGJ4ICJUsvj6UVRiYC20Yn1BTG1ZDkBlZjHSi3DVWK3dczuDXgF2iydV0S+94e'
+    'xFhG2WNaM0jI8uevZfCVzzdW0IOU3f2NxWhqEHg4P47Ia0rJ4sffbCtUpySvHujH7QEfsZLSYuYUKhEp'
+    'YK32p+4x+zlQBp9aEsfqZXFrtWcfSxX6nvrHBHqHfVvflAoBHM8o9I8E+OJjKaxsr8vTJn9dMGxY2WCN'
+    'sWVtEs0pgY96XZuyta5FoSkivlQFWk1poBOXxsNaJk+VzauTaEpy+x7J8YtjEJa/k71ItU+yjuHXx+/j'
+    'w17PrhXldSSdo1KE2o/+0GffK7IX3WQoC1mtasdBqdDCUe8wXP4wgyu3cjaVknzu0XpsWtWApmS4I707'
+    '6OPiB2nUx5i12qQxtLFeGEkrvH5i0B5XptKwMj19eQLnr00gVc+stydj03Ys2ozNOAvZeoiF6fLYhdHC'
+    '+faHYvja5qZC17/8fRwDIz6kfTRWHltUgWo01jO89e6w9QLnbJIX6GEgZbl9RwdCBWsubEQhqBlnoYgC'
+    'dQ7Dn7tH4QfhteaUxNNrUoWuxy+O2ngJy4wK40JrHXphPMD+o/3hQpjvSMApninO3rs6gWScrF+dIYSd'
+    '42MEMc1ObqtzgGu3c7h0PV2gFgUhtY/6PHQX6BOWGZOHCHftlIkaExyHzg3jxl3XeoG4H1mfFHNEFLjV'
+    'MRJ2TvERDlq92X75FmUsEtdXOHp+JM9rCrqwL3lmaDxPn/w90f3Fli/EmLHp9xdH+sL9T976b58fxYVr'
+    'aTSQ9e1jiupNzYRC8RgrrIqUh8mqxOFEjOGv74/aeseRDDFJTymBYxdGClWqVhoxJ7yXaGeLQhZSiLQL'
+    'bCxwHDk3bD1KKZTG23e0D7G89TElO2hDowAjKvfEdtvHgBt3XLheeO1Wv2tB0sAxydDT76LrzCCeXJEq'
+    'XL98M20zFcUK9b1z38PNe65NhZRZxjKBVcRSQxsIAaSzCnvfvIdfffcRHHpnCN0fTGBRo7SGqiVhMQew'
+    'ZV/v7hJOw1e1n6GipfLJXEUpUKYk7anzd9FxFAuFftUeClQp4AJl8Nae5djzu3/j/etpJOtFRQouEcWd'
+    'hFB++k1J33nVKmvtXGWny/GE1iy5VlbiT3d/6Sr8ws9uYiwd2AQwlfVJ8osZkwbwqmecGjf+l9em6mPy'
+    'TyUGR71CTTTtOOGGxpPQ6Amz1Nw+lTZ5JT6GIama65FaB3+D8pnROkwjcyhmpjY0hmvlM8IuhZs9FQC9'
+    'XMRajfIodczvLzgMfcERg/KzvdLNnuI9RzpGoM3vIRP0iF2FZeo8bcY2RVgJM2En1rFA6Z8EubFBMCmM'
+    '0nqme9JZb0prwkhYCTNh5+js4n2HnuqH9naAx5jdn+l5qISmVYE2y1RkeTss5s6ufM7qNAJdTLVtP/Mi'
+    'l6n9Rnswyg/AaGGb65gwtgJnwpGMx6CD8Z29Bze+FmEugtt0UuJ0R9Cy7ex2IeL7maxvNUEaNrDB5uan'
+    'BjCciRhjsgEmyPYp5e4cOLzhYISVek1G1XlAoOs51fLsyTZRn9iltXqeMfqxh6zYmDxoYfbb+YCeQN/m'
+    'XLyhspm9A8c6eiOMxX7lUtJhwZfONsUdZyODelwb3U4FqbYl3oMTHm4SPc54j4G44Pr+mdE/brA/tykH'
+    'T6f+A2B/+wRrMlSTAAAAAElFTkSuQmCC'
+)
+
+
+def _set_icon(root):
+    """设置窗口与任务栏图标（数据内嵌，源码/打包运行均生效）"""
+    try:
+        root.iconphoto(True, tk.PhotoImage(data=_APP_ICON_B64))
+    except Exception:
+        pass
+
+
 def main():
     if _HAS_DND:
         root = TkinterDnD.Tk()  # 支持文件拖拽
     else:
         root = tk.Tk()
+    _set_icon(root)
     App(root)
     root.mainloop()
 

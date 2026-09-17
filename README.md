@@ -1,5 +1,11 @@
 # md2txt_gui — Markdown 转纯文本小工具
 
+<div align="center">
+
+<img src="app.ico" width="128" alt="md2txt_gui 图标">
+
+</div>
+
 Windows 桌面小工具：把 Markdown 转换成适合粘贴进 **OneNote / Word / 聊天软件** 的格式。
 
 左侧输入 Markdown，右侧实时预览，一键复制。公式可编辑、表格是真表格、列表自动编号。
@@ -14,9 +20,8 @@ Windows 桌面小工具：把 Markdown 转换成适合粘贴进 **OneNote / Word
 - **公式**：支持 `$...$`、`$$...$$`、`\(...\)`、`\[...\]`
 - **表格**：转换为真表格（含对齐），单元格内格式与公式照常生效
 - **文件操作**：菜单打开/保存 `.md`、`.txt`（Ctrl+O / Ctrl+S），支持拖拽文件到输入框
-- **粘贴设置**：菜单「设置 → 粘贴设置…」可配置粘贴产物的中文字体与字号（默认**等线 / 12 磅**）、各级标题字体与字号（默认**等线 / 14 磅**）、段前/段后间距（默认 **0 磅**）；「正文加粗字段保留」（**默认不勾选**）勾选后 Markdown **加粗** 字段保留加粗，不勾选则全部不加粗
-- **复刻 Markdown 排版**：设置里的开关（**默认关闭**）——勾选后不单独设置字体/字号/加粗，标题与表头保持加粗、保留 Word 默认分级字号，粘贴后使用目标软件的默认字体
-- **内容记忆**：输入内容、窗口大小、开关与粘贴设置自动保存，下次启动直接恢复
+- **粘贴字体设置**：菜单「设置 → 粘贴字体…」可配置粘贴产物的中文字体、字号、是否加粗，默认**等线 / 12 磅（小四）/ 不加粗**（公式除外全局生效，标题字号随设置放大）
+- **内容记忆**：输入内容、窗口大小、开关与字体设置自动保存，下次启动直接恢复
 - **Word 常驻加速**：开关开启后 Word 进程后台常驻，公式复制从秒级降到毫秒级
 
 ## 三种复制模式
@@ -34,15 +39,6 @@ Windows 桌面小工具：把 Markdown 转换成适合粘贴进 **OneNote / Word
 - 「公式可编辑」模式需要本机安装 Microsoft Word
 - 「公式为图片」模式无额外要求
 
-## 直接下载 exe（推荐）
-
-从仓库下载 `md2txt_gui.exe`（约 47MB，PyInstaller 单文件打包），放到任意目录**双击即可运行**：
-
-- **无需安装 Python** 及任何依赖，Python 解释器和全部依赖库都打包在 exe 内
-- 首次启动需几秒解压到临时目录，属正常现象
-- 「公式可编辑」模式需要目标电脑安装 Microsoft Word；没有 Word 时用「公式为图片」模式即可
-- 未签名的 exe 可能触发 Windows SmartScreen / 杀软提示，选择「仍要运行」或加入信任即可
-
 ## 安装与运行（源码方式）
 
 ```bash
@@ -56,10 +52,10 @@ python md2txt_gui.py
 
 ```bash
 pip install pyinstaller
-pyinstaller --noconfirm --onefile --windowed --name md2txt_gui --collect-all tkinterdnd2 --collect-data latex2mathml md2txt_gui.py
+pyinstaller --noconfirm --onefile --windowed --icon=app.ico --name md2txt_gui --collect-all tkinterdnd2 --collect-data latex2mathml md2txt_gui.py
 ```
 
-生成 `dist/md2txt_gui.exe`，单文件约 45MB，无需 Python 环境即可运行。
+生成 `dist/md2txt_gui.exe`，单文件约 45MB，无需 Python 环境即可运行。`app.ico` 为应用图标（窗口/任务栏图标已内嵌在源码中，替换图标时同步更新 `md2txt_gui.py` 里的 `_APP_ICON_B64`）。
 
 ## 配置文件
 
@@ -68,7 +64,6 @@ pyinstaller --noconfirm --onefile --windowed --name md2txt_gui --collect-all tki
 - 上次输入框内容
 - 窗口大小位置
 - 「Word 常驻加速」开关状态
-- 粘贴设置（字体、字号、标题字体、标题字号、正文加粗字段保留、段前/段后、复刻 Markdown 排版开关）
 
 删除该文件即可恢复初始状态。**该文件包含个人输入内容，请勿提交到仓库。**
 
@@ -91,4 +86,3 @@ md2txt_gui/
 - **Word 中转**：`DispatchEx` 起独立 Word 实例，只读打开、复制、关闭，不影响用户正开着的 Word
 - **富文本剪贴板**：CF_HTML + CF_UNICODETEXT 双格式写入（ctypes 直接调 Win32 API）
 - **公式图片**：matplotlib mathtext 渲染 PNG，base64 内嵌 HTML
-- **标题字体**：Word 标题样式自带 asciiTheme/eastAsiaTheme 主题字体属性，OOXML 规范中优先于显式字体；设置字体时须一并清除，否则标题会渲染成 MS Gothic/微软雅黑
