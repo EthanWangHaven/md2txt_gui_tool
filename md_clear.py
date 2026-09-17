@@ -986,6 +986,13 @@ class App:
             root.geometry(cfg['geometry'])
         else:
             root.geometry('1150x680')
+        # 上次保存的位置可能已跑出屏幕外（更换显示器/修改缩放后），此时居中显示
+        m = re.match(r'(\d+)x(\d+)([+-]\d+)([+-]\d+)$', str(cfg.get('geometry') or ''))
+        if m:
+            w, h, x, y = (int(g) for g in m.groups())
+            sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
+            if x >= sw - 40 or y >= sh - 40 or x <= -(w - 40) or y <= -(h - 40):
+                root.geometry(f'{w}x{h}+{max(0, (sw - w) // 2)}+{max(0, (sh - h) // 2)}')
         self.var_word_keep = tk.BooleanVar(value=bool(cfg.get('word_keep')))
         # 转换后（粘贴产物）的默认字体设置：等线 / 12 磅（小四）/ 不加粗
         self.var_font = tk.StringVar(value=str(cfg.get('font') or '等线'))
@@ -1358,6 +1365,11 @@ class App:
         ttk.Button(btns, text='取消',
                    command=lambda: self._restore_settings(backup, win)
                    ).pack(side='left')
+        # 弹窗居中显示在屏幕中间
+        win.update_idletasks()
+        w, h = win.winfo_reqwidth(), win.winfo_reqheight()
+        sw, sh = win.winfo_screenwidth(), win.winfo_screenheight()
+        win.geometry(f'+{(sw - w) // 2}+{(sh - h) // 2}')
         win.grab_set()
 
     def _restore_settings(self, backup, win):
