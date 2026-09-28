@@ -1052,9 +1052,11 @@ class App:
         file_menu.add_command(label='保存结果为纯文本…',
                               command=self.save_result)
         menubar.add_cascade(label='文件', menu=file_menu)
-        # 设置菜单：粘贴产物的默认字体
+        # 设置菜单：粘贴产物的默认字体 + 关于
         set_menu = tk.Menu(menubar, tearoff=0)
         set_menu.add_command(label='粘贴设置…', command=self.open_settings)
+        set_menu.add_separator()
+        set_menu.add_command(label='关于 MdClear…', command=self.show_about)
         menubar.add_cascade(label='设置', menu=set_menu)
         root.config(menu=menubar)
         root.bind('<Control-o>', lambda e: self.open_file())
@@ -1112,10 +1114,10 @@ class App:
         self.btn_img.pack(side='left', padx=(8, 0))
         self.btn_copy = ttk.Button(bar, text=PLAIN_LABEL, command=self.copy_result)
         self.btn_copy.pack(side='left', padx=(8, 0))
-        hint = ('「公式可编辑」直接写入剪贴板（免 Word）；'
+        hint = ('支持拖入MD文件；粘贴时请使用保留源格式粘贴；'
                 '内容与设置自动记忆')
-        if _HAS_DND:
-            hint = '支持拖入 .md/.txt 文件。' + hint
+        if not _HAS_DND:  # 缺少拖拽组件时不误导用户
+            hint = '粘贴时请使用保留源格式粘贴；内容与设置自动记忆'
         ttk.Label(bar, text=hint).pack(side='right')
 
         # 实时转换：按键释放、粘贴、撤销等事件均触发（150ms 防抖）
@@ -1315,6 +1317,31 @@ class App:
             return float(var.get())
         except ValueError:
             return 0
+
+    def show_about(self):
+        """关于对话框（样式与粘贴设置一致）：作者 / 联系方式 / 开源地址 / 版权"""
+        win = tk.Toplevel(self.root)
+        win.title('关于 MdClear')
+        win.resizable(False, False)
+        win.transient(self.root)
+        body = ttk.Frame(win, padding=12)
+        body.pack(fill='both', expand=True)
+        info = (
+            'MdClear — Markdown 转纯文本小工具\n'
+            '把 Markdown 转换成适合粘贴进 OneNote / Word / 聊天软件的格式\n\n'
+            '作者：wangce\n'
+            '联系方式：2253246@tongji.edu.cn\n'
+            '开源地址：https://github.com/EthanWangHaven/md2txt_gui_tool\n\n'
+            'Copyright © 2026 wangce. 保留所有权利。')
+        ttk.Label(body, text=info, justify='left').pack(anchor='w')
+        ttk.Button(body, text='确定', command=win.destroy).pack(
+            anchor='e', pady=(10, 0))
+        # 居中显示（与粘贴设置一致）
+        win.update_idletasks()
+        w, h = win.winfo_reqwidth(), win.winfo_reqheight()
+        sw, sh = win.winfo_screenwidth(), win.winfo_screenheight()
+        win.geometry(f'+{(sw - w) // 2}+{(sh - h) // 2}')
+        win.grab_set()
 
     def open_settings(self):
         """粘贴设置：中文字体/字号/标题字体/标题字号/正文加粗字段保留/段前段后/复刻 Markdown 排版"""
