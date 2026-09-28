@@ -116,6 +116,13 @@ def _plain_line(line, store):
 
 def _sanitize_latex(latex):
     """清洗 AI 生成 LaTeX 的常见噪声，返回可直接交给转换器的版本"""
+    # Unicode 变体字符还原（从聊天窗口/Office 复制常见的不可见差异，
+    # matplotlib mathtext 与 texmath 遇到会渲染失败）
+    for bad, good in (('‑', '-'),   # U+2011 非断行连字符
+                      ('−', '-'),   # U+2212 数学减号
+                      ('–', '-'),   # U+2013 en dash
+                      ('—', '-')):  # U+2014 em dash
+        latex = latex.replace(bad, good)
     # \, \; \: \! \  等显式空格命令：latex2mathml 会把 \ 转成 m:nor 普通文本
     # run，Word 线性化为 " "，OneNote 粘贴后公式显示损坏；统一还原为普通空格
     latex = latex.replace('\\!', '').replace('\\ ', ' ')
@@ -218,7 +225,8 @@ def _render_math_png_bytes(latex):
         matplotlib.use('Agg')
         from matplotlib.figure import Figure
         fig = Figure()
-        fig.text(0, 0, f'${latex}$', fontsize=13)
+        # 与 OMML 路径共用同一套清洗（Unicode 变体字符、\kern 等）
+        fig.text(0, 0, f'${_sanitize_latex(latex)}$', fontsize=13)
         buf = io.BytesIO()
         fig.savefig(buf, format='png', dpi=110, transparent=True,
                     bbox_inches='tight', pad_inches=0.06)
@@ -1228,8 +1236,7 @@ class App:
                 kind = b[0]
                 if kind == 'table':
                     prev_blank = False
-                    for tl in _render_table_text(b[1], store):
-                        self.out_tb.insert('end', tl + '\n')
+                    self._insert_table(b[1], store)
                     continue
                 if kind == 'code':
                     prev_blank = False
@@ -1278,6 +1285,76 @@ class App:
             if last < len(frag):
                 self.out_tb.insert('end', frag[last:], tags)
         self.out_tb.insert('end', '\n')
+
+    def _insert_table(self, rows, store):
+        """预览表格：文本对齐布局，单元格内公式渲染为图片插入（此前为纯文本
+        还原，公式带 \\(…\\) 分隔符原样显示，观感与其他部分不一致）"""
+        import tkinter.font as tkfont
+        aligns, rows = _split_sep_row(rows)
+        if not rows:
+            return
+        ncols = max(len(r) for r in rows)
+        rows = [r + [''] * (ncols - len(r)) for r in rows]
+        char_px = max(1, tkfont.Font(font=self.out_tb.cget('font')).measure('0'))
+
+        def cell_frags(cell):
+            """单元格 → [(text, fmt, extra), …]；extra: None=文本, 'code', 或图片对象"""
+            frags = []
+            t = _plain_pre(cell)
+            for frag, fmt in _parse_fmt(t):
+                last = 0
+                for m in PH_RE.finditer(frag):
+                    if m.start() > last:
+                        frags.append((frag[last:m.start()], fmt, None))
+                    seg = store[int(m.group(1))]
+                    if seg['kind'] == 'code':
+                        frags.append((seg['text'], fmt, 'code'))
+                    elif _HAS_LATEX:
+                        img = self._math_image(seg['latex'])
+                        if img is not None:
+                            frags.append((None, fmt, img))
+                        else:
+                            frags.append((seg['text'], fmt, None))
+                    else:
+                        frags.append((seg['text'], fmt, None))
+                    last = m.end()
+                if last < len(frag):
+                    frags.append((frag[last:], fmt, None))
+            return frags or [('', frozenset(), None)]
+
+        def frag_width(text, extra):
+            """片段显示宽度（字符单位；图片按像素宽折算，CJK 算 2 与 _display_width 一致）"""
+            if text is None and extra not in (None, 'code'):
+                return max(4, round(extra.width() / char_px))
+            return _display_width(text or '')
+
+        grid = [ [cell_frags(c) for c in r] for r in rows ]
+        widths = [0] * ncols
+        for cells in grid:
+            for j, frags in enumerate(cells):
+                widths[j] = max(widths[j],
+                                sum(frag_width(t, x) for t, _f, x in frags))
+
+        for idx, cells in enumerate(grid):
+            self.out_tb.insert('end', '| ')
+            for j, frags in enumerate(cells):
+                used = 0
+                for text, fmt, extra in frags:
+                    tags = [f'f_{"".join(sorted(fmt))}'] if fmt else []
+                    if extra == 'code':
+                        tags.append('code')
+                    if text is None and extra not in (None, 'code'):
+                        self.out_tb.image_create('end-1c', image=extra)
+                        self._imgs.append(extra)
+                    else:
+                        self.out_tb.insert('end', text, tags)
+                    used += frag_width(text, extra)
+                if j < ncols - 1:
+                    self.out_tb.insert('end', ' ' * (widths[j] - used + 1) + '| ')
+            self.out_tb.insert('end', '|\n')
+            if idx == 0:
+                self.out_tb.insert(
+                    'end', '|' + '|'.join('-' * (w + 2) for w in widths) + '|\n')
 
     def _math_image(self, latex):
         """渲染公式图片并缓存（失败也缓存，避免重复渲染开销）"""
