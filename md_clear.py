@@ -1054,9 +1054,9 @@ class App:
         menubar.add_cascade(label='文件', menu=file_menu)
         # 设置菜单：粘贴产物的默认字体 + 关于
         set_menu = tk.Menu(menubar, tearoff=0)
-        set_menu.add_command(label='粘贴设置…', command=self.open_settings)
+        set_menu.add_command(label='粘贴设置', command=self.open_settings)
         set_menu.add_separator()
-        set_menu.add_command(label='关于 MdClear…', command=self.show_about)
+        set_menu.add_command(label='关于', command=self.show_about)
         menubar.add_cascade(label='设置', menu=set_menu)
         root.config(menu=menubar)
         root.bind('<Control-o>', lambda e: self.open_file())
