@@ -1056,7 +1056,8 @@ class App:
         set_menu = tk.Menu(menubar, tearoff=0)
         set_menu.add_command(label='粘贴设置', command=self.open_settings)
         set_menu.add_separator()
-        set_menu.add_command(label='关于', command=self.show_about)
+        set_menu.add_command(label='关于', font=('Microsoft YaHei UI', 8),
+                             command=self.show_about)
         menubar.add_cascade(label='设置', menu=set_menu)
         root.config(menu=menubar)
         root.bind('<Control-o>', lambda e: self.open_file())
