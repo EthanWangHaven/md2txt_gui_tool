@@ -3,6 +3,13 @@ build/
 dist/
 *.spec
 
+# Pandoc 引擎（打包时从本地引入，体积过大不入库）
+pandoc/
+pandoc.zip
+
+# 参考项目克隆（PasteMD 等外部仓库）
+参考文件/
+
 # 运行时个人配置（含输入内容记忆）
 config.json
 

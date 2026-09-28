@@ -2,14 +2,13 @@
 """
 Markdown 转纯文本小工具
 - 图形界面：左侧输入 Markdown，右侧实时预览（标题/粗体/斜体/代码块带格式显示）
-- 「复制纯文本」：所有标记转纯文本，公式保持 $...$ LaTeX 原文
-- 「复制（公式可编辑）」：生成含 OMML 公式、真表格、Heading 标题、代码块灰底的 docx，
-  Word 后台全选复制，粘贴进 OneNote 得可编辑公式与完整格式（需本机装有 Word）
-- 「复制（公式为图片）」：公式渲染为 PNG 图片的富文本（无需 Word）
+- 「复制（公式可编辑）」：Markdown → Pandoc → HTML(MathML) → OMML 条件注释 → 剪贴板，
+  粘贴进 OneNote/Word 即为原生可编辑公式（免 Word，毫秒级；无 Pandoc 时自动降级内置转换器）
+- 「复制（公式为图片）」：公式渲染为 PNG 图片的富文本（无需 Word），任何软件中公式均为图片
+- 「复制源MD」：原样复制输入框中的 Markdown 源文本
 - 列表自动编号：1. → (1) → a.，每个列表组独立计数
 - 文件菜单：打开/保存 .md/.txt（Ctrl+O / Ctrl+S）；支持拖拽文件到输入框导入
 - 内容与设置（窗口大小、开关状态）自动记忆
-- Word 常驻加速开关：开启后 Word 进程后台常驻，复制从秒级降到毫秒级
 """
 import base64
 import ctypes
@@ -18,11 +17,13 @@ import io
 import json
 import os
 import re
+import shutil
+import subprocess
 import sys
-import tempfile
 import time
 import unicodedata
 from ctypes import wintypes
+from html.entities import name2codepoint
 import tkinter as tk
 from tkinter import filedialog, ttk
 
@@ -32,17 +33,6 @@ try:
     _HAS_LATEX = True
 except ImportError:
     _HAS_LATEX = False
-
-try:
-    import win32com.client
-    from docx import Document
-    from docx.enum.text import WD_ALIGN_PARAGRAPH
-    from docx.oxml import parse_xml
-    from docx.oxml.ns import nsdecls, qn
-    from docx.shared import Pt, RGBColor
-    _HAS_WORDCOM = True
-except ImportError:
-    _HAS_WORDCOM = False
 
 try:  # 拖拽支持（缺失时自动降级为不可拖拽）
     from tkinterdnd2 import DND_FILES, TkinterDnD
@@ -65,6 +55,24 @@ def _display_width(s):
     return sum(2 if unicodedata.east_asian_width(c) in 'FW' else 1 for c in s)
 
 
+def _fix_math_delimiters(text):
+    """公式分隔符规范化（修复 AI 输出的非标准写法，代码块已先被占位符保护）"""
+    # $ x $ 内侧带空格 → $x$（否则下方 $ 正则不匹配，公式原样残留）
+    text = re.sub(r'(?<!\$)\$(?!\$)[ \t]+([^\n$]+?)[ \t]+(?<!\$)\$(?!\$)',
+                  r'$\1$', text)
+    # 单独成行的成对 $ → $$（非标准块级公式分隔符）
+    lines = text.split('\n')
+    out = []
+    in_block = False
+    for line in lines:
+        if re.fullmatch(r'\s*\$\s*', line):
+            out.append(f"{line[:line.find('$')]}$$")
+            in_block = not in_block
+        else:
+            out.append(line)
+    return '\n'.join(out)
+
+
 def _protect(text):
     """把公式、代码块、行内代码替换为占位符；存为 {kind, text, latex}"""
     store = []
@@ -79,6 +87,8 @@ def _protect(text):
                   lambda m: add('code', m.group(1)), text, flags=re.S)
     # 行内代码
     text = re.sub(r'`([^`\n]+)`', lambda m: add('code', m.group(1)), text)
+    # 公式分隔符规范化
+    text = _fix_math_delimiters(text)
     # 公式：$$...$$（可跨行，块级）
     text = re.sub(r'\$\$(.+?)\$\$',
                   lambda m: add('math', m.group(0), m.group(1), True), text, flags=re.S)
@@ -104,19 +114,31 @@ def _plain_line(line, store):
     return _restore(_inline(line), store)
 
 
-def latex_to_omml_element(latex, display=False):
-    """LaTeX → MathML → OMML；剥掉 mathml2omml 输出的非标准 m:box 包装"""
-    mml = latex2mathml.converter.convert(latex)
+def _sanitize_latex(latex):
+    """清洗 AI 生成 LaTeX 的常见噪声，返回可直接交给转换器的版本"""
+    # \, \; \: \! \  等显式空格命令：latex2mathml 会把 \ 转成 m:nor 普通文本
+    # run，Word 线性化为 " "，OneNote 粘贴后公式显示损坏；统一还原为普通空格
+    latex = latex.replace('\\!', '').replace('\\ ', ' ')
+    latex = re.sub(r'\\[,;:]', ' ', latex)
+    # \kern1.5pt / {\kern1.5pt}：KaTeX 输出的间距（pandoc 生态常见），转成空格
+    latex = re.sub(r'\{?\\kern\s*[-\d.]+(?:pt|em|cm|mm|ex|bp|mu)\}?', ' ', latex)
+    # \operatorname{RNN} → \mathrm{RNN}：latex2mathml 不支持前者
+    latex = latex.replace('\\operatorname', '\\mathrm')
+    return latex
+
+
+def latex_to_omml_xml(latex, display=False):
+    """LaTeX → OMML XML 字符串（剪贴板条件注释用）；失败抛异常；
+    display 块级公式外包 oMathPara（自带命名空间声明）"""
+    mml = latex2mathml.converter.convert(_sanitize_latex(latex))
     omml = mathml2omml.convert(mml)
     omml = omml.replace('<m:box><m:e>', '').replace('</m:e></m:box>', '')
     m = re.match(r'^<m:oMath[^>]*>(.*)</m:oMath>$', omml, flags=re.S)
     body = m.group(1) if m else omml
     if display:
-        xml = (f'<m:oMathPara xmlns:m="{OMML_NS}">'
-               f'<m:oMath>{body}</m:oMath></m:oMathPara>')
-    else:
-        xml = f'<m:oMath xmlns:m="{OMML_NS}">{body}</m:oMath>'
-    return parse_xml(xml)
+        return (f'<m:oMathPara xmlns:m="{OMML_NS}">'
+                f'<m:oMath>{body}</m:oMath></m:oMathPara>')
+    return f'<m:oMath xmlns:m="{OMML_NS}">{body}</m:oMath>'
 
 
 def _math_html_img(seg):
@@ -495,8 +517,8 @@ def _render_table_text(rows, store):
     return out
 
 
-def _render_table_html(rows, store, keep_bold=True):
-    """渲染成 HTML 真表格（富文本复制用，单元格内公式以图片嵌入）"""
+def _render_table_html(rows, store, keep_bold=True, math_fn=None):
+    """渲染成 HTML 真表格（富文本复制用，单元格内公式交给 math_fn）"""
     aligns, rows = _split_sep_row(rows)
     if not rows:
         return ''
@@ -512,7 +534,7 @@ def _render_table_html(rows, store, keep_bold=True):
             style = ''
             if aligns and j < len(aligns) and aligns[j] != 'left':
                 style = f' style="text-align:{aligns[j]};"'
-            h.append(f'<{tag}{style}>{_restore_html(cell, store, keep_bold=keep_bold)}</{tag}>')
+            h.append(f'<{tag}{style}>{_restore_html(cell, store, math_fn=math_fn, keep_bold=keep_bold)}</{tag}>')
         h.append('</tr>')
     h.append('</table>')
     return ''.join(h)
@@ -544,8 +566,9 @@ def md_to_text(md):
 
 
 def md_to_html(md, hsize=None, hfont=None, keep_bold=False, sp_before=0,
-               sp_after=0):
-    """Markdown → HTML 片段：公式渲染为内嵌 PNG 图片、表格转真表格（「公式为图片」复制用）
+               sp_after=0, math_fn=None):
+    """Markdown → HTML 片段：公式交给 math_fn（默认渲染为内嵌 PNG 图片）、
+    表格转真表格（富文本复制用）
     标题转 h 标签、粗体/斜体/删除线转真标签、代码块转 pre；
     hsize/hfont：各级标题字号（磅）与字体，None 表示不设置
     （粘贴后由目标软件默认分级字号/正文字体渲染）
@@ -561,7 +584,8 @@ def md_to_html(md, hsize=None, hfont=None, keep_bold=False, sp_before=0,
         payload = b[1]
         if kind == 'table':
             prev_blank = False
-            t = _render_table_html(payload, store, keep_bold=keep_bold)
+            t = _render_table_html(payload, store, keep_bold=keep_bold,
+                                   math_fn=math_fn)
             if t:
                 parts.append(t)
             continue
@@ -574,7 +598,8 @@ def md_to_html(md, hsize=None, hfont=None, keep_bold=False, sp_before=0,
             continue
         if kind == 'heading':
             lv = min(payload, 6)
-            body = _restore_html(b[2], store, keep_bold=keep_bold)
+            body = _restore_html(b[2], store, math_fn=math_fn,
+                                 keep_bold=keep_bold)
             h_style = margin
             if hsize:
                 h_style += f'font-size:{hsize}pt;'
@@ -590,7 +615,7 @@ def md_to_html(md, hsize=None, hfont=None, keep_bold=False, sp_before=0,
             parts.append('<p><br/></p>')
             continue
         prev_blank = False
-        parts.append(f'<p style="{margin}">{_restore_html(payload, store, keep_bold=keep_bold)}</p>')
+        parts.append(f'<p style="{margin}">{_restore_html(payload, store, math_fn=math_fn, keep_bold=keep_bold)}</p>')
     result = ''.join(parts)
     # 去掉首尾的空段落
     blank = '<p><br/></p>'
@@ -601,244 +626,252 @@ def md_to_html(md, hsize=None, hfont=None, keep_bold=False, sp_before=0,
     return result
 
 
-# ---------------- docx 生成 + Word 中转复制 ----------------
-def _run_shd(r, fill='F2F2F2'):
-    """run 加底纹（行内代码灰底）"""
-    r._element.get_or_add_rPr().append(
-        parse_xml(f'<w:shd {nsdecls("w")} w:val="clear" w:color="auto" w:fill="{fill}"/>'))
+# ---------------- Pandoc 集成 + Office HTML（OMML 条件注释） ----------------
+# 原理（Word 官方剪贴板同款技术）：HTML 里写入
+#   <!--[if gte msEquation 12]><m:oMath>…</m:oMath><![endif]-->
+#   <![if !msEquation]>回退内容<![endif]-->
+# OneNote/Word 会取原生 OMML 渲染为可编辑公式，其他软件取回退内容。
+
+MS_OMML_HTML_NS = 'http://schemas.microsoft.com/office/2004/12/omml'
+
+_RE_MATHML = re.compile(r'<math[^>]*>.*?</math>', re.S | re.I)
+
+_PANDOC_PATH = None
 
 
-def _para_shd(p, fill='F2F2F2'):
-    """段落加底纹（代码块整行灰底）"""
-    p._p.get_or_add_pPr().append(
-        parse_xml(f'<w:shd {nsdecls("w")} w:val="clear" w:color="auto" w:fill="{fill}"/>'))
+def _find_pandoc():
+    """定位 pandoc.exe：打包内置 → 程序目录 → PATH；找不到返回 None（结果缓存）"""
+    global _PANDOC_PATH
+    if _PANDOC_PATH is not None:
+        return _PANDOC_PATH or None
+    candidates = []
+    if getattr(sys, 'frozen', False) and getattr(sys, '_MEIPASS', None):
+        candidates.append(os.path.join(sys._MEIPASS, 'pandoc', 'pandoc.exe'))
+    candidates.append(os.path.join(_app_dir(), 'pandoc', 'pandoc.exe'))
+    which = shutil.which('pandoc')
+    if which:
+        candidates.append(which)
+    for c in candidates:
+        if c and os.path.isfile(c):
+            _PANDOC_PATH = c
+            return c
+    _PANDOC_PATH = ''
+    return None
 
 
-def _docx_fill_line(p, line, store, bold=False, keep_bold=True):
-    """把一行写入 docx 段落：粗体/斜体/删除线转真格式 run，
-    行内代码等宽灰底，公式转 OMML 公式对象（bold 用于表头行）；
-    keep_bold=False 时 Markdown **加粗** 片段不产生加粗 run（全部不加粗）"""
-    t = _plain_pre(line)
-
-    def add_text(s, fmt=frozenset(), code=False):
-        if not s:
-            return
-        r = p.add_run(s)
-        if bold or (keep_bold and 'b' in fmt):
-            r.bold = True
-        if 'i' in fmt:
-            r.italic = True
-        if 's' in fmt:
-            r.font.strike = True
-        if code:
-            r.font.name = 'Consolas'
-            _run_shd(r)
-
-    for frag, fmt in _parse_fmt(t):
-        last = 0
-        for m in PH_RE.finditer(frag):
-            add_text(frag[last:m.start()], fmt)
-            seg = store[int(m.group(1))]
-            if seg['kind'] == 'code':
-                add_text(seg['text'], fmt, code=True)
-            elif _HAS_LATEX:
-                try:
-                    p._p.append(latex_to_omml_element(seg['latex'], seg['display']))
-                except Exception:
-                    add_text(seg['text'])  # 转换失败回退为 $...$ 原文
-            else:
-                add_text(seg['text'])
-            last = m.end()
-        add_text(frag[last:], fmt)
+def _pandoc_md_to_mathml_html(md):
+    """Pandoc：Markdown → HTML 片段（公式为 MathML；语法覆盖远超内置转换器）"""
+    pandoc = _find_pandoc()
+    if not pandoc:
+        raise RuntimeError('未找到 pandoc.exe')
+    cmd = [os.path.abspath(pandoc),
+           # hard_line_breaks：AI 笔记普遍用单换行分行（①②③条目等），
+           # 标准 Markdown 会合并成一段；与内置转换器逐行处理的行为对齐
+           '-f', 'markdown+hard_line_breaks'
+                 '+tex_math_dollars+tex_math_single_backslash'
+                 '+tex_math_double_backslash',
+           '-t', 'html', '--math-method=mathml', '--wrap=none']
+    kwargs = {}
+    if os.name == 'nt':  # 窗口程序里不闪控制台黑框
+        si = subprocess.STARTUPINFO()
+        si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        kwargs = {'startupinfo': si,
+                  'creationflags': subprocess.CREATE_NO_WINDOW}
+    r = subprocess.run(cmd, input=md.encode('utf-8'), capture_output=True,
+                       shell=False, **kwargs)
+    if r.returncode != 0:
+        raise RuntimeError('Pandoc 转换失败: ' +
+                           (r.stderr or b'').decode('utf-8', 'ignore')[:300])
+    return r.stdout.decode('utf-8', 'ignore')
 
 
-def _set_style_font(st, name, size_pt, bold):
-    """样式设置字体：西文 + 中文字体（eastAsia）、字号、加粗；
-    并清除模板自带的主题字体属性（asciiTheme 等）——按 OOXML 规范主题属性
-    优先于显式字体，不清除会导致标题仍按 majorEastAsia 渲染成 MS Gothic/微软雅黑"""
-    st.font.name = name          # ascii/hAnsi 西文字体
-    st.font.size = Pt(size_pt)
-    st.font.bold = bold
-    rpr = st.element.get_or_add_rPr()
-    rfonts = rpr.get_or_add_rFonts()
-    rfonts.set(qn('w:eastAsia'), name)  # 中文字体
-    for attr in ('asciiTheme', 'hAnsiTheme', 'eastAsiaTheme', 'cstheme'):
-        rfonts.attrib.pop(qn('w:' + attr), None)
+def _mathml_to_omml(mathml, display=False):
+    """MathML → OMML 字符串（m: 命名空间由剪贴板 HTML 的 <html> 声明）；
+    display 块级公式外包 oMathPara；失败抛异常"""
+    # 剥掉 pandoc 内嵌的原始 LaTeX 注释节点（mathml2omml 不认识且会污染回退文本）
+    mathml = re.sub(r'<annotation[^>]*>.*?</annotation>', '', mathml, flags=re.S)
+    omml = mathml2omml.convert(mathml, name2codepoint)
+    omml = omml.replace('<m:box><m:e>', '').replace('</m:e></m:box>', '')
+    m = re.match(r'^<m:oMath[^>]*>(.*)</m:oMath>$', omml, flags=re.S)
+    body = m.group(1) if m else omml
+    if display and m:
+        # oMathPara 内必须嵌套完整 oMath（与 Word 自身剪贴板输出一致；
+        # 无容器的裸 m:r/m:sSub 碎片会被 OneNote 当普通文本渲染）
+        return f'<m:oMathPara><m:oMath>{body}</m:oMath></m:oMathPara>'
+    if m:
+        return omml  # mathml2omml 输出的完整 <m:oMath>…</m:oMath>
+    return f'<m:oMath>{omml}</m:oMath>'
 
 
-def md_to_docx(md, font='等线', size=12, keep=False, hsize=14, hfont=None,
-               keep_bold=False, sp_before=0, sp_after=0):
-    """Markdown → docx 文档：公式为 OMML 公式对象、表格为真表格、标题用 Heading 样式、
-    代码块等宽灰底；段落格式：单倍行距，段前/段后按设置（默认 0 磅紧凑，含表格内）
-    font/size：正文字体、字号（磅）
-    hsize/hfont：各级标题的统一字号（磅，默认 14）与字体（None 表示与正文同字体）
-    keep_bold：正文加粗字段保留——勾选后 Markdown 中 **加粗** 的片段保留加粗，
-    不勾选则全部字段不加粗（默认不勾选；复刻模式强制保留）
-    sp_before/sp_after：段前/段后间距（磅，默认 0）
-    keep：复刻 Markdown 排版——不设置字体/字号/加粗，标题与表头保持加粗，
-    粘贴后使用目标软件的默认字体"""
-    blocks, store = _convert(md)
-    doc = Document()
-    # 复刻模式强制保留 Markdown 加粗形态；统一模式由 keep_bold 选项控制
-    kb = keep_bold or keep
-    # Normal 样式：单倍行距、段前段后按设置（对所有段落生效，含表格内）；
-    # 全局加粗已移除：Normal 恒不加粗，** 片段按 keep_bold 单独决定是否加粗
-    pf = doc.styles['Normal'].paragraph_format
-    pf.space_before = Pt(sp_before)
-    pf.space_after = Pt(sp_after)
-    pf.line_spacing = 1
-    if not keep:
-        _set_style_font(doc.styles['Normal'], font, size, False)
-    # Heading 样式：段前段后按设置，颜色改黑（默认蓝色在笔记里太扎眼）；
-    # 统一模式：各级标题统一用 hsize/hfont（设置里可配，默认 14 磅/与正文字体同），
-    # 显式不加粗（覆盖模板默认加粗）
-    # 复刻模式：字体字号全不动（保留 Word 默认的加粗与分级字号，即 Markdown 标题形态）
-    for lv in range(1, 7):
+def _replace_mathml_with_omml(html_text):
+    """把 HTML 里的 MathML 替换为 OMML 条件注释（回退内容为公式纯文本）"""
+    def _sub(m):
+        mathml = m.group(0)
+        # 剥掉 pandoc 内嵌的原始 LaTeX 注释节点（会混入回退文本、mathml2omml 不认识）
+        mathml = re.sub(r'<annotation[^>]*>.*?</annotation>', '', mathml,
+                        flags=re.S)
+        display = 'display="block"' in mathml
+        fallback = html.escape(re.sub(r'<[^>]+>', '', mathml))
         try:
-            st = doc.styles[f'Heading {lv}']
-        except KeyError:
-            continue
-        st.paragraph_format.space_before = Pt(sp_before)
-        st.paragraph_format.space_after = Pt(sp_after)
-        st.font.color.rgb = RGBColor(0, 0, 0)
-        if not keep:
-            _set_style_font(st, hfont or font, hsize, False)
-    prev_table = False
-    prev_blank = False
-    for b in blocks:
-        kind = b[0]
-        payload = b[1]
-        if kind == 'table':
-            aligns, rows = _split_sep_row(payload)
-            if not rows:
-                continue
-            if prev_table:  # 相邻两个表格间加空段，防止 Word 把它们合并
-                doc.add_paragraph()
-            ncols = max(len(r) for r in rows)
-            rows = [r + [''] * (ncols - len(r)) for r in rows]
-            table = doc.add_table(rows=len(rows), cols=ncols)
-            table.style = 'Table Grid'
-            for i, r in enumerate(rows):
-                for j, cell in enumerate(r):
-                    p = table.rows[i].cells[j].paragraphs[0]
-                    # 表头：复刻模式加粗（Markdown 表格惯例）；统一模式不加粗
-                    _docx_fill_line(p, cell, store, bold=(i == 0 and keep),
-                                    keep_bold=kb)
-                    if aligns and j < len(aligns) and aligns[j] != 'left':
-                        p.alignment = (WD_ALIGN_PARAGRAPH.CENTER
-                                       if aligns[j] == 'center'
-                                       else WD_ALIGN_PARAGRAPH.RIGHT)
-            prev_table = True
-            prev_blank = False
-            continue
-        prev_table = False
-        if kind == 'heading':
-            p = doc.add_paragraph()
-            p.style = doc.styles[f'Heading {min(payload, 6)}']
-            _docx_fill_line(p, b[2], store, keep_bold=kb)
-            prev_blank = False
-            continue
-        if kind == 'code':
-            for cl in payload.split('\n'):
-                p = doc.add_paragraph()
-                _para_shd(p)
-                r = p.add_run(cl)
-                r.font.name = 'Consolas'
-            prev_blank = False
-            continue
-        if _plain_line(payload, store).strip() == '':
-            if prev_blank:  # 连续空行只保留一个
-                continue
-            prev_blank = True
-            doc.add_paragraph()  # 空行 → 空段落（保留作者的分段意图）
-            continue
-        prev_blank = False
-        _docx_fill_line(doc.add_paragraph(), payload, store, keep_bold=kb)
-    return doc
-
-
-_word_app = None  # 常驻的 Word 实例（开关开启后复用，避免每次启动 Word）
-
-
-def _get_word():
-    """获取/启动常驻 Word 实例（隐藏窗口）"""
-    global _word_app
-    if _word_app is None:
-        _word_app = win32com.client.DispatchEx('Word.Application')
-        _word_app.Visible = False
-        _word_app.DisplayAlerts = 0
-    return _word_app
-
-
-def _release_word():
-    """释放常驻 Word 实例（窗口退出时调用）"""
-    global _word_app
-    if _word_app is not None:
-        try:
-            _word_app.Quit()
+            omml = _mathml_to_omml(mathml, display)
         except Exception:
-            pass
-        _word_app = None
+            return fallback
+        return (f'<!--[if gte msEquation 12]>{omml}<![endif]-->'
+                f'<![if !msEquation]>{fallback}<![endif]>')
+    return _RE_MATHML.sub(_sub, html_text)
 
 
-def _copy_via_word(docx_path, resident=False):
-    """用 Word 打开 docx → 全选复制 → 关闭：剪贴板获得 Office 原生公式格式
-    resident=True 复用常驻实例（首次约 2-3 秒，之后毫秒级）"""
-    if not resident:
-        # DispatchEx 起独立实例，用完即退，不会动用户正开着的 Word
-        word = win32com.client.DispatchEx('Word.Application')
-        word.Visible = False
-        word.DisplayAlerts = 0
-        try:
-            # Open(FileName, ConfirmConversions, ReadOnly, AddToRecentFiles)
-            d = word.Documents.Open(os.path.abspath(docx_path), False, True, False)
-            try:
-                d.Content.Copy()
-            finally:
-                d.Close(0)  # 0 = 不保存
-        finally:
-            word.Quit()
-        return
-    for attempt in (1, 2):  # 实例可能被外部杀掉：失败则重建一次
-        word = _get_word()
-        try:
-            d = word.Documents.Open(os.path.abspath(docx_path), False, True, False)
-            try:
-                d.Content.Copy()
-            finally:
-                d.Close(0)
-            return
-        except Exception:
-            _release_word()
-            if attempt == 2:
-                raise
-
-
-def copy_md_via_word(md, resident=False, font='等线', size=12, keep=False,
-                     hsize=14, hfont=None, keep_bold=False, sp_before=0,
-                     sp_after=0):
-    """Markdown → docx（OMML 公式 + 真表格）→ Word 全选复制进剪贴板"""
-    doc = md_to_docx(md, font=font, size=size, keep=keep, hsize=hsize,
-                     hfont=hfont, keep_bold=keep_bold, sp_before=sp_before,
-                     sp_after=sp_after)
-    fd, path = tempfile.mkstemp(suffix='.docx')
-    os.close(fd)
+def _math_omml_conditional(seg):
+    """无 Pandoc 的内置路径：公式 → OMML 条件注释（失败回退 $...$ 原文）"""
     try:
-        doc.save(path)
-        _copy_via_word(path, resident)
-    finally:
-        try:
-            os.remove(path)
-        except OSError:
-            pass  # Word 进程退出稍有延迟，删不掉就留在临时目录
+        omml = latex_to_omml_xml(seg['latex'], seg['display'])
+        omml = omml.replace(f' xmlns:m="{OMML_NS}"', '')
+    except Exception:
+        return html.escape(seg['text'])
+    return (f'<!--[if gte msEquation 12]>{omml}<![endif]-->'
+            f'<![if !msEquation]>{html.escape(seg["text"])}<![endif]>')
+
+
+def _strip_html_bold(body):
+    """keep_bold=False：删除 <strong>/<b> 标签（保留内部内容）"""
+    return re.sub(r'</?(?:strong|b)\b[^>]*>', '', body)
+
+
+def _flatten_lists(md):
+    """把 Markdown 列表压平为本应用的层级编号方案（1. → (1) → a. → i.）：
+    输出转义后的普通段落（前后留空行、缩进用 &nbsp;），数字已转义，
+    pandoc 不再解析为原生列表 → OneNote 中不出现圆点符号；
+    编号方案与纯文本/预览路径保持一致"""
+    out = []
+    lines = md.split('\n')
+    i = 0
+    n = len(lines)
+    in_code = False
+    while i < n:
+        line = lines[i]
+        if line.lstrip().startswith('```'):  # 代码围栏内不处理
+            in_code = not in_code
+            out.append(line)
+            i += 1
+            continue
+        if in_code:
+            out.append(line)
+            i += 1
+            continue
+        raw = re.sub(r'^\s*(?:>\s?)+', '', line)
+        if not _RE_LISTITEM.match(raw):
+            out.append(line)
+            i += 1
+            continue
+        # 收集连续列表项（与 _convert 相同的松列表规则）
+        items = []
+        j = i
+        while j < n:
+            if lines[j].lstrip().startswith('```'):
+                break
+            raw_j = re.sub(r'^\s*(?:>\s?)+', '', lines[j])
+            mj = _RE_LISTITEM.match(raw_j)
+            if mj:
+                items.append((mj.group(1), mj.group(2)))
+                j += 1
+                continue
+            if raw_j.strip() == '':  # 空行：后随仍是列表项则并入块内
+                k = j + 1
+                while k < n and lines[k].strip() == '':
+                    k += 1
+                if k < n and _RE_LISTITEM.match(
+                        re.sub(r'^\s*(?:>\s?)+', '', lines[k])):
+                    j += 1
+                    continue
+            break
+        # 按缩进宽度分层（与 _convert 一致）
+        widths = sorted({len(it[0].expandtabs(4)) for it in items})
+        counters = {}
+        for indent, content in items:
+            level = widths.index(len(indent.expandtabs(4))) + 1
+            counters = {lv: c for lv, c in counters.items() if lv <= level}
+            counters[level] = counters.get(level, 0) + 1
+            num = counters[level]
+            # 数字转义，防止 pandoc 重新解析为列表
+            if level == 1:
+                label = f'{num}\\.'
+            elif level == 2:
+                label = f'({num}\\)'
+            elif level == 3:
+                label = f'{_to_letter(num)}\\.'
+            else:
+                label = f'{_to_roman(num)}\\.'
+            nbsp = '&nbsp;' * len(indent.expandtabs(4))
+            if out and out[-1].strip():
+                out.append('')  # 与前文空行分隔，避免被并进上一段落
+            out.append(f'{nbsp}{label} {content}')
+            out.append('')
+        i = j
+    return '\n'.join(out)
+
+
+def _style_pandoc_html(body, *, keep, hsize, hfont, sp_before, sp_after):
+    """给 pandoc HTML 注入内联样式（OneNote 对 <style> 块支持差）；
+    复刻模式不动样式，使用目标软件默认渲染"""
+    if keep:
+        return body
+    margin = ('' if sp_before == 0 and sp_after == 0
+              else f'margin:{sp_before}pt 0 {sp_after}pt 0;')
+    if margin:
+        body = re.sub(r'<p>', f'<p style="{margin}">', body)
+    # 标题统一字号/字体，且不加粗（对齐旧版「统一模式」行为：
+    # OneNote 会按自身 Heading 样式加粗，须显式覆盖）
+    h_style = 'font-weight:normal;'
+    if hsize:
+        h_style += f'font-size:{hsize}pt;'
+    if hfont:
+        h_style += f"font-family:'{hfont}';"
+    body = re.sub(r'<h([1-6])(\s|>)',
+                  lambda m: f'<h{m.group(1)} style="{h_style}"{m.group(2)}',
+                  body)
+    # pandoc 表格默认无边框，补边框样式（td/th 可能已带对齐 style，需合并）
+    def _cell(m):
+        tag = m.group(0)
+        if 'style="' in tag:
+            return tag.replace('style="',
+                               'style="border:1px solid #999;padding:4px 8px;', 1)
+        return tag[:-1] + ' style="border:1px solid #999;padding:4px 8px;">'
+    body = re.sub(r'<table>', '<table style="border-collapse:collapse;">', body)
+    body = re.sub(r'<t[dh][^>]*>', _cell, body)
+    # 表头单元格同样不加粗（OneNote 默认 th 加粗）
+    body = re.sub(r'<th style="border',
+                  '<th style="font-weight:normal;border', body)
+    return body
+
+
+def _office_math_html(md, *, keep, hsize, hfont, keep_bold,
+                      sp_before, sp_after):
+    """「公式可编辑」：Markdown → 含 OMML 条件注释的 HTML 正文；
+    优先 Pandoc（语法覆盖广、公式支持矩阵等复杂结构），无 Pandoc 时用内置转换器"""
+    pandoc = _find_pandoc()
+    if pandoc:
+        # 压平列表（消除圆点、应用自动编号）并规范化公式分隔符；
+        # 复刻模式不压平，保留 Markdown 原生列表形态
+        md2 = md if keep else _flatten_lists(_fix_math_delimiters(md))
+        body = _replace_mathml_with_omml(_pandoc_md_to_mathml_html(md2))
+        if not (keep_bold or keep):  # 复刻模式强制保留加粗
+            body = _strip_html_bold(body)
+        body = _style_pandoc_html(body, keep=keep, hsize=hsize, hfont=hfont,
+                                  sp_before=sp_before, sp_after=sp_after)
+    else:
+        body = md_to_html(md, hsize=None if keep else hsize,
+                          hfont=None if keep else hfont,
+                          keep_bold=keep_bold or keep,
+                          sp_before=sp_before, sp_after=sp_after,
+                          math_fn=_math_omml_conditional)
+    return body
 
 
 # ---------------- Windows 剪贴板（CF_HTML 富文本） ----------------
-def _set_clipboard_html(html_fragment, plain_text, font='等线', size=12,
-                        keep=False):
-    """把 HTML（内嵌 OMML 公式、真表格）和纯文本同时写入剪贴板；
-    font/size 作为粘贴产物的全局默认字体设置；
-    keep=True 时不写字体样式，粘贴后用目标软件默认字体（复刻 Markdown 排版）"""
+def _set_clipboard_html(html_fragment, plain_text, body_attr=''):
+    """把 Office HTML（含 OMML 公式条件注释）和纯文本同时写入剪贴板；
+    body_attr 写在 <body> 标签上（如字体样式；复刻模式传空）；
+    <html> 上声明 Office OMML 命名空间，OneNote/Word 才能解析公式"""
     user32 = ctypes.windll.user32
     kernel32 = ctypes.windll.kernel32
     user32.RegisterClipboardFormatW.restype = wintypes.UINT
@@ -851,13 +884,15 @@ def _set_clipboard_html(html_fragment, plain_text, font='等线', size=12,
     user32.SetClipboardData.restype = ctypes.c_void_p
     user32.SetClipboardData.argtypes = [wintypes.UINT, ctypes.c_void_p]
 
-    body_style = ('' if keep else
-                  f'style="font-family:\'{font}\';font-size:{size}pt;"')
     cf_html = user32.RegisterClipboardFormatW('HTML Format')
     header = ('Version:0.9\r\nStartHTML:{:010d}\r\nEndHTML:{:010d}\r\n'
               'StartFragment:{:010d}\r\nEndFragment:{:010d}\r\n')
-    pre = (f'<html><head><meta charset="utf-8"></head>'
-           f'<body {body_style}>\r\n<!--StartFragment-->')
+    pre = (f'<html xmlns:o="urn:schemas-microsoft-com:office:office"'
+           f' xmlns:m="{MS_OMML_HTML_NS}"'
+           f' xmlns="http://www.w3.org/TR/REC-html40">'
+           f'<head><meta http-equiv="Content-Type" content="text/html;'
+           f' charset=utf-8"></head>'
+           f'<body{body_attr}>\r\n<!--StartFragment-->')
     post = '<!--EndFragment-->\r\n</body></html>'
 
     frag = html_fragment.encode('utf-8')
@@ -942,7 +977,7 @@ IN_FONT = ('Microsoft YaHei UI', 11)
 OUT_FONT = ('Consolas', 11)
 RICH_LABEL = '复制（公式可编辑）'
 IMG_LABEL = '复制（公式为图片）'
-PLAIN_LABEL = '复制纯文本'
+PLAIN_LABEL = '复制源MD'
 
 def _app_dir():
     """程序所在目录：打包成 exe 后 __file__ 指向临时解压目录，须用 exe 路径"""
@@ -993,7 +1028,6 @@ class App:
             sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
             if x >= sw - 40 or y >= sh - 40 or x <= -(w - 40) or y <= -(h - 40):
                 root.geometry(f'{w}x{h}+{max(0, (sw - w) // 2)}+{max(0, (sh - h) // 2)}')
-        self.var_word_keep = tk.BooleanVar(value=bool(cfg.get('word_keep')))
         # 转换后（粘贴产物）的默认字体设置：等线 / 12 磅（小四）/ 不加粗
         self.var_font = tk.StringVar(value=str(cfg.get('font') or '等线'))
         self.var_font_size = tk.StringVar(value=str(cfg.get('font_size') or 12))
@@ -1078,12 +1112,8 @@ class App:
         self.btn_img.pack(side='left', padx=(8, 0))
         self.btn_copy = ttk.Button(bar, text=PLAIN_LABEL, command=self.copy_result)
         self.btn_copy.pack(side='left', padx=(8, 0))
-        self.chk_word = ttk.Checkbutton(
-            bar, text='Word 常驻加速', variable=self.var_word_keep,
-            command=self._toggle_word_keep)
-        self.chk_word.pack(side='left', padx=(8, 0))
-        hint = ('「公式可编辑」后台调用 Word；开启常驻后首次稍慢、之后毫秒级复制；'
-                 '内容与设置自动记忆')
+        hint = ('「公式可编辑」直接写入剪贴板（免 Word）；'
+                '内容与设置自动记忆')
         if _HAS_DND:
             hint = '支持拖入 .md/.txt 文件。' + hint
         ttk.Label(bar, text=hint).pack(side='right')
@@ -1161,11 +1191,10 @@ class App:
             self._load_into_editor(self._read_file(path), path)
 
     def _on_close(self):
-        """退出时：保存配置（内容/窗口/开关）并释放常驻 Word"""
+        """退出时：保存配置（内容/窗口/开关）"""
         _save_config({
             'text': self.in_tb.get('1.0', 'end-1c'),
             'geometry': self.root.geometry(),
-            'word_keep': self.var_word_keep.get(),
             'font': self.var_font.get(),
             'font_size': self._font_size_val(),
             'head_size': self._head_size_val(),
@@ -1175,7 +1204,6 @@ class App:
             'sp_after': self._sp_val(self.var_sp_after),
             'keep_markdown': self.var_font_keep.get(),
         })
-        _release_word()
         self.root.destroy()
 
     def _schedule(self, _event=None):
@@ -1261,15 +1289,11 @@ class App:
         self.root.after(1500, lambda: btn.config(text=restore_label))
 
     def copy_result(self):
-        content = self.out_tb.get('1.0', 'end-1c')
+        """复制输入框中的 Markdown 源文本（原样，不做任何转换）"""
+        src = self.in_tb.get('1.0', 'end-1c')
         self.root.clipboard_clear()
-        self.root.clipboard_append(content)
-        self._flash(self.btn_copy, '已复制 ✓', PLAIN_LABEL)
-
-    def _toggle_word_keep(self):
-        """开关切换：关闭时立即释放常驻实例"""
-        if not self.var_word_keep.get():
-            _release_word()
+        self.root.clipboard_append(src)
+        self._flash(self.btn_copy, '已复制源MD ✓', PLAIN_LABEL)
 
     def _font_size_val(self):
         """字号设置的数值（非法输入回退 12 磅）"""
@@ -1385,30 +1409,35 @@ class App:
         win.destroy()
 
     def copy_rich(self):
-        """生成 docx（OMML 公式+真表格）→ Word 后台全选复制 → 粘贴进 OneNote 即可编辑公式"""
+        """Markdown → 含 OMML 条件注释的 Office HTML 直写剪贴板（免 Word），
+        粘贴进 OneNote/Word 即得原生可编辑公式"""
         src = self.in_tb.get('1.0', 'end-1c')
-        if not _HAS_WORDCOM or not _HAS_LATEX:
-            self._flash(self.btn_rich, '缺少 pywin32/python-docx', RICH_LABEL)
+        if not _HAS_LATEX:
+            self._flash(self.btn_rich, '缺少 latex2mathml/mathml2omml', RICH_LABEL)
             return
-        self.btn_rich.config(text='正在调用 Word…')
+        self.btn_rich.config(text='正在转换…')
         self.root.update_idletasks()
         try:
-            copy_md_via_word(src, resident=self.var_word_keep.get(),
-                             font=self.var_font.get(),
-                             size=self._font_size_val(),
-                             keep=self.var_font_keep.get(),
-                             hsize=self._head_size_val(),
-                             hfont=self.var_head_font.get(),
-                             keep_bold=self.var_keep_bold.get(),
-                             sp_before=self._sp_val(self.var_sp_before),
-                             sp_after=self._sp_val(self.var_sp_after))
+            plain = md_to_text(src)
+            keep = self.var_font_keep.get()
+            body = _office_math_html(
+                src, keep=keep,
+                hsize=self._head_size_val(), hfont=self.var_head_font.get(),
+                keep_bold=self.var_keep_bold.get(),
+                sp_before=self._sp_val(self.var_sp_before),
+                sp_after=self._sp_val(self.var_sp_after))
+            body_attr = ('' if keep else
+                         f' style="font-family:\'{self.var_font.get()}\';'
+                         f'font-size:{self._font_size_val()}pt;"')
+            _set_clipboard_html(body, plain, body_attr=body_attr)
         except Exception as e:
             self._flash(self.btn_rich, f'失败:{e}', RICH_LABEL)
             return
         self._flash(self.btn_rich, '已复制 ✓ 粘贴试试', RICH_LABEL)
 
     def copy_rich_img(self):
-        """公式渲染为 PNG 图片 + 真表格，以富文本写入剪贴板（无需 Word）"""
+        """公式渲染为 PNG 图片 + 真表格，以富文本写入剪贴板（无需 Word）；
+        OneNote/浏览器/聊天软件中公式均为图片"""
         src = self.in_tb.get('1.0', 'end-1c')
         try:
             plain = md_to_text(src)
@@ -1421,8 +1450,10 @@ class App:
                               keep_bold=(keep or self.var_keep_bold.get()),
                               sp_before=self._sp_val(self.var_sp_before),
                               sp_after=self._sp_val(self.var_sp_after))
-            _set_clipboard_html(body, plain, font=self.var_font.get(),
-                                size=self._font_size_val(), keep=keep)
+            body_attr = ('' if keep else
+                         f' style="font-family:\'{self.var_font.get()}\';'
+                         f'font-size:{self._font_size_val()}pt;"')
+            _set_clipboard_html(body, plain, body_attr=body_attr)
         except Exception as e:
             self._flash(self.btn_img, f'失败:{e}', IMG_LABEL)
             return
