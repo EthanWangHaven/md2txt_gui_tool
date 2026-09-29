@@ -1114,14 +1114,17 @@ class App:
         for lv, size in zip(range(1, 7), (16, 13, 12, 11, 11, 11)):
             self.out_tb.tag_configure(f'h{lv}', font=(OUT_FONT[0], size, 'bold'))
 
-        # 底部按钮栏
+        # 底部按钮栏（固定宽度：状态文本变化时按钮不伸缩，右侧按钮不位移）
         bar = ttk.Frame(outer)
         bar.pack(fill='x', pady=(8, 0))
-        self.btn_rich = ttk.Button(bar, text=RICH_LABEL, command=self.copy_rich)
+        self.btn_rich = ttk.Button(bar, text=RICH_LABEL, command=self.copy_rich,
+                                   width=20)
         self.btn_rich.pack(side='left')
-        self.btn_img = ttk.Button(bar, text=IMG_LABEL, command=self.copy_rich_img)
+        self.btn_img = ttk.Button(bar, text=IMG_LABEL, command=self.copy_rich_img,
+                                  width=20)
         self.btn_img.pack(side='left', padx=(8, 0))
-        self.btn_copy = ttk.Button(bar, text=PLAIN_LABEL, command=self.copy_result)
+        self.btn_copy = ttk.Button(bar, text=PLAIN_LABEL, command=self.copy_result,
+                                   width=14)
         self.btn_copy.pack(side='left', padx=(8, 0))
         hint = ('支持拖入MD文件；粘贴时请使用保留源格式粘贴；'
                 '内容与设置自动记忆')
