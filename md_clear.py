@@ -107,6 +107,17 @@ def _unwrap_code_math_spans(text):
     return text
 
 
+def _math_like_block(inner):
+    """跨行 \\(...\\)/\\[...\\] 的内容是否像公式块：含环境或换行分隔符 \\
+    即可认定；含中文叙述且无环境/\\\\ 的视为误配（前文孤立的 \\( 把
+    大段正文吞成一个"公式"，导致占位符裸泄漏、定界符错位）"""
+    if PH_OPEN in inner:
+        return False  # 吞进了已提取的公式/代码 → 必然误配
+    if '\\begin{' in inner or '\\\\' in inner:
+        return True
+    return not re.search(r'[\u4e00-\u9fff]', inner)
+
+
 def _protect(text):
     """把公式、代码块、行内代码替换为占位符；存为 {kind, text, latex}"""
     store = []
@@ -128,15 +139,25 @@ def _protect(text):
     # 公式：$$...$$（可跨行，块级）
     text = re.sub(r'\$\$(.+?)\$\$',
                   lambda m: add('math', m.group(0), m.group(1), True), text, flags=re.S)
-    # 公式：\[...\]（块级，支持跨行，如 \[\begin{aligned}...\end{aligned}\]）
-    text = re.sub(r'\\\[(.*?)\\\]',
-                  lambda m: add('math', m.group(0), m.group(1), True), text, flags=re.S)
+    # 公式：\[...\]（块级）——单行直取；跨行需像公式块（防孤立 \[ 吞正文）
+    text = re.sub(r'\\\[([^\n]+?)\\\]',
+                  lambda m: add('math', m.group(0), m.group(1), True), text)
+    text = re.sub(r'\\\[(.+?)\\\]',
+                  lambda m: add('math', m.group(0), m.group(1), True)
+                  if _math_like_block(m.group(1)) else m.group(0),
+                  text, flags=re.S)
     # 公式：$...$（单行，内容不含 $、首尾不为空格）
     text = re.sub(r'(?<!\\)\$([^\s$](?:[^$\n]*[^\s$])?)\$',
                   lambda m: add('math', m.group(0), m.group(1)), text)
-    # 公式：\(...\)（支持跨行，如 \(\begin{aligned}...\\...\end{aligned}\)）
-    text = re.sub(r'\\\((.*?)\\\)',
-                  lambda m: add('math', m.group(0), m.group(1)), text, flags=re.S)
+    # 公式：\(...\)（行内）——单行直取；跨行需像公式块，如
+    # \(\begin{aligned}...\\...\end{aligned}\)（防孤立 \( 吞正文导致
+    # 占位符裸泄漏、$ 定界符错位——Zotero 模式公式合并 bug 的根源）
+    text = re.sub(r'\\\(([^\n]+?)\\\)',
+                  lambda m: add('math', m.group(0), m.group(1)), text)
+    text = re.sub(r'\\\((.+?)\\\)',
+                  lambda m: add('math', m.group(0), m.group(1))
+                  if _math_like_block(m.group(1)) else m.group(0),
+                  text, flags=re.S)
     return text, store
 
 
@@ -617,8 +638,8 @@ def _repair_multiline_paren_math(md):
     去掉 & 对齐符——OneNote 硬解析这种块会产生空公式方框，拆分后逐行正常显示"""
     def _split(m):
         inner = m.group(1)
-        if '\n' not in inner:
-            return m.group(0)  # 单行公式不动
+        if '\n' not in inner or not _math_like_block(m.group(1)):
+            return m.group(0)  # 单行公式不动；跨行但非公式块（误配/正文）不动
         inner = re.sub(r'\\(?:begin|end)\{[a-zA-Z*]+\}', '', inner)
         lines = []
         for seg in inner.split('\\\\'):
@@ -716,8 +737,10 @@ def md_to_zotero(md):
                 emit_display(seg)
                 continue
             latex = _zotero_latex(seg['latex'])
-            if '\\begin{' in latex:
-                # aligned/cases 等环境按独立公式输出（$$ 块，KaTeX 渲染为多行对齐）
+            if '\\begin{' in latex or '\n' in latex:
+                # aligned/cases 等环境或含换行的公式按独立公式输出（$$ 块，
+                # KaTeX 渲染为多行对齐）；行内输出 $...$ 会被换行拆成
+                # 前后两个不成对的 $，导致后续公式定界符全部错位
                 if cur.strip():
                     out.append(cur)
                     cur = ''
@@ -738,8 +761,64 @@ def md_to_zotero(md):
     # 单字母无上下标公式：$ 与前后正文之间不加空格（Better Notes 解析兼容）
     res = re.sub(r' \$([A-Za-z])\$', r'$\1$', res)
     res = re.sub(r'\$([A-Za-z])\$ ', r'$\1$', res)
+    # 行内公式 flanking 修复：Better Notes（markdown-it-katex）按 CommonMark
+    # flanking 规则判断 $ 配对——公式边界是标点（如 $O(N)$ 的 `)`）且另一侧
+    # 紧贴文字（如 `大小`）时，闭合 $ 判定失败，会把后续一段正文吞进公式，
+    # 造成 $ 错位显示。在需要的一侧补一个空格恢复配对（$O(N)$ 大小）。
+    # `\` 开头的命令（$\ell$…）实测可正常配对，保持无空格不动
+    res = _fix_math_flank(res)
     res = re.sub(r'\n{3,}', '\n\n', res)
     return res.strip()
+
+
+_ASCII_PUNCT = set('!"#$%&\'()*+,-./:;<=>?@[\\]^_`{|}~')
+
+
+def _fix_math_flank(res):
+    """行内 $...$ 公式边界为标点且紧贴文字的一侧补空格（见 md_to_zotero 注释）；
+    $$ 块、转义 \\$、非公式形态的孤立 $ 不动"""
+    def _wordish(c):
+        return bool(c) and not c.isspace() and c not in _ASCII_PUNCT
+
+    out = []
+    i, n = 0, len(res)
+    while i < n:
+        c = res[i]
+        if c != '$':
+            out.append(c)
+            i += 1
+            continue
+        if i and res[i - 1] == '\\':  # 转义 \$，按普通文本
+            out.append(c)
+            i += 1
+            continue
+        if i + 1 < n and res[i + 1] == '$':  # $$ 块整体跳过
+            j = res.find('$$', i + 2)
+            if j == -1:
+                out.append(res[i:])
+                break
+            out.append(res[i:j + 2])
+            i = j + 2
+            continue
+        j = res.find('$', i + 1)
+        content = res[i + 1:j] if j != -1 else ''
+        # 校验为合法行内公式形态（同行、非空、首尾无空格，与 _protect 一致）
+        if (j == -1 or '\n' in content or not content
+                or content[0].isspace() or content[-1].isspace()):
+            out.append(c)
+            i += 1
+            continue
+        prev = res[i - 1] if i else ''
+        nxt = res[j + 1] if j + 1 < n else ''
+        # 开头为标点且前方紧贴文字 → 前补空格（`\` 例外，实测可配对）
+        if content[0] in _ASCII_PUNCT and content[0] != '\\' and _wordish(prev):
+            out.append(' ')
+        out.append(res[i:j + 1])
+        # 结尾为标点且后方紧贴文字 → 后补空格
+        if content[-1] in _ASCII_PUNCT and _wordish(nxt):
+            out.append(' ')
+        i = j + 1
+    return ''.join(out)
 
 
 # ---------------- 最终输出 ----------------
@@ -1585,8 +1664,12 @@ class App:
         self._flash(self.btn_copy, '已复制源MD ✓', PLAIN_LABEL)
 
     def copy_zotero(self):
-        """Markdown → Zotero Better Notes 兼容 Markdown（公式规范为 $/$$，
-        免去每次给 AI 手写格式提示词），以纯文本写入剪贴板"""
+        """Markdown → Zotero Better Notes 兼容 Markdown（公式规范为 $/$$）。
+        只写纯文本剪贴板：Better Notes 的 Markdown 粘贴插件仅当剪贴板
+        无 HTML 格式、且纯文本命中 Markdown 特征（#/-/>/$...$ 等）时，
+        才对纯文本做全量 Markdown 转换（见其 markdownPaste.ts getMarkdown）；
+        一旦剪贴板带 HTML 格式会被原样插入，标题/列表退化为字面文本。
+        行内公式 $ 配对问题由 md_to_zotero 的 flanking 修复保证"""
         src = self.in_tb.get('1.0', 'end-1c')
         self.btn_zotero.config(text='正在转换…')
         self.root.update_idletasks()
