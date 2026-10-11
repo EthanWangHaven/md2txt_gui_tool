@@ -1,4 +1,4 @@
-# MdClear — Markdown 转纯文本小工具
+# MdClear — Markdown 笔记转换粘贴工具
 
 <div align="center">
 
