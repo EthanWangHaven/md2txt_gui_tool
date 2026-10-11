@@ -73,6 +73,40 @@ def _fix_math_delimiters(text):
     return '\n'.join(out)
 
 
+def _unwrap_code_math_spans(text):
+    """行内代码里包着的 $...$ 公式（AI 常见写法：`...$Q_{ego}$...`）：
+    去掉反引号按公式处理，否则粘贴后显示为原始 $Q_{ego}$ 文本。
+    代码块整体不动；无空格或含数学特征字符才认定是公式（避免误伤
+    `cost $5 and $10` 这类文本）"""
+    blocks = []
+
+    def _stash(m):
+        blocks.append(m.group(0))
+        return f'{PH_OPEN}B{len(blocks) - 1}{PH_CLOSE}'
+
+    # 先隔离代码块，避免误改块内内容
+    text = re.sub(r'```[^\n]*\n.*?(?:\n)?```', _stash, text, flags=re.S)
+
+    def _unwrap(m):
+        inner = m.group(1)
+        if '$' not in inner:
+            return m.group(0)  # 无 $，普通代码原样保留
+
+        def _repl(mm):
+            c = mm.group(1)
+            if ' ' not in c or re.search(r'[_^{}\\]', c):
+                return f'\\({c}\\)'
+            return mm.group(0)
+
+        new = re.sub(r'\$([^$\n]{1,80})\$', _repl, inner)
+        return new if new != inner else m.group(0)  # $ 非公式形态则保留代码
+
+    text = re.sub(r'`([^`\n]+)`', _unwrap, text)
+    for i, b in enumerate(blocks):
+        text = text.replace(f'{PH_OPEN}B{i}{PH_CLOSE}', b)
+    return text
+
+
 def _protect(text):
     """把公式、代码块、行内代码替换为占位符；存为 {kind, text, latex}"""
     store = []
@@ -85,6 +119,8 @@ def _protect(text):
     # 代码块 ```...```（内容原样保留）
     text = re.sub(r'```[^\n]*\n(.*?)(?:\n)?```',
                   lambda m: add('code', m.group(1)), text, flags=re.S)
+    # 行内代码里包着的 $...$ 公式 → 解包为公式（共享函数，见上）
+    text = _unwrap_code_math_spans(text)
     # 行内代码
     text = re.sub(r'`([^`\n]+)`', lambda m: add('code', m.group(1)), text)
     # 公式分隔符规范化
@@ -92,15 +128,15 @@ def _protect(text):
     # 公式：$$...$$（可跨行，块级）
     text = re.sub(r'\$\$(.+?)\$\$',
                   lambda m: add('math', m.group(0), m.group(1), True), text, flags=re.S)
-    # 公式：\[...\]（块级）
+    # 公式：\[...\]（块级，支持跨行，如 \[\begin{aligned}...\end{aligned}\]）
     text = re.sub(r'\\\[(.*?)\\\]',
                   lambda m: add('math', m.group(0), m.group(1), True), text, flags=re.S)
     # 公式：$...$（单行，内容不含 $、首尾不为空格）
     text = re.sub(r'(?<!\\)\$([^\s$](?:[^$\n]*[^\s$])?)\$',
                   lambda m: add('math', m.group(0), m.group(1)), text)
-    # 公式：\(...\)
+    # 公式：\(...\)（支持跨行，如 \(\begin{aligned}...\\...\end{aligned}\)）
     text = re.sub(r'\\\((.*?)\\\)',
-                  lambda m: add('math', m.group(0), m.group(1)), text)
+                  lambda m: add('math', m.group(0), m.group(1)), text, flags=re.S)
     return text, store
 
 
@@ -114,8 +150,9 @@ def _plain_line(line, store):
     return _restore(_inline(line), store)
 
 
-def _sanitize_latex(latex):
-    """清洗 AI 生成 LaTeX 的常见噪声，返回可直接交给转换器的版本"""
+def _sanitize_latex(latex, to_mathrm=True):
+    """清洗 AI 生成 LaTeX 的常见噪声，返回可直接交给转换器的版本
+    to_mathrm=False 时不做 \\operatorname→\\mathrm 转换（KaTeX 支持前者）"""
     # Unicode 变体字符还原（从聊天窗口/Office 复制常见的不可见差异，
     # matplotlib mathtext 与 texmath 遇到会渲染失败）
     for bad, good in (('‑', '-'),   # U+2011 非断行连字符
@@ -130,7 +167,8 @@ def _sanitize_latex(latex):
     # \kern1.5pt / {\kern1.5pt}：KaTeX 输出的间距（pandoc 生态常见），转成空格
     latex = re.sub(r'\{?\\kern\s*[-\d.]+(?:pt|em|cm|mm|ex|bp|mu)\}?', ' ', latex)
     # \operatorname{RNN} → \mathrm{RNN}：latex2mathml 不支持前者
-    latex = latex.replace('\\operatorname', '\\mathrm')
+    if to_mathrm:
+        latex = latex.replace('\\operatorname', '\\mathrm')
     return latex
 
 
@@ -372,6 +410,10 @@ def _convert(md):
     ('line', str) | ('heading', 级别, str) | ('code', 原文) | ('table', cells)
     行内格式标记（**粗体** 等）保留在文本里，由各消费端自行解析"""
     text = md.replace('\r\n', '\n').replace('\r', '\n')
+    text = _strip_hr_lines(text)
+    # 非标准 aligned 包 \(...\) 块拆行：mathtext（图片/预览）不支持
+    # \begin{aligned} 环境，整块渲染会失败回退为原始文本
+    text = _repair_multiline_paren_math(text)
     text, store = _protect(text)
 
     lines = text.split('\n')
@@ -548,6 +590,158 @@ def _render_table_html(rows, store, keep_bold=True, math_fn=None):
     return ''.join(h)
 
 
+# ---------------- 复制源MD 的公式修复 ----------------
+def _strip_hr_lines(text):
+    """删除独立的分隔线行（---、***、———、─── 等线条字符组成的行）；
+    围栏代码块内的内容不动。AI 笔记常用 --- 当段落分隔，粘贴到
+    OneNote 会渲染成一条横线，各转换模式统一过滤"""
+    out = []
+    in_code = False
+    for line in text.split('\n'):
+        if re.match(r'\s*```', line):
+            in_code = not in_code
+            out.append(line)
+            continue
+        s = line.strip()
+        if (not in_code and s
+                and re.fullmatch(r'[\s\-*_—－─–−=~▪•]+', s)
+                and len(re.findall(r'[\-—－─–−*_]', s)) >= 3):
+            continue  # 分隔线行，删除
+        out.append(line)
+    return '\n'.join(out)
+
+
+def _repair_multiline_paren_math(md):
+    """修复 AI 输出的非标准多行 \\(...\\) 公式块（如整个 aligned 环境包在
+    \\(...\\) 里、内部含 & 对齐符与换行）：拆分为逐行独立 \\(...\\) 公式并
+    去掉 & 对齐符——OneNote 硬解析这种块会产生空公式方框，拆分后逐行正常显示"""
+    def _split(m):
+        inner = m.group(1)
+        if '\n' not in inner:
+            return m.group(0)  # 单行公式不动
+        inner = re.sub(r'\\(?:begin|end)\{[a-zA-Z*]+\}', '', inner)
+        lines = []
+        for seg in inner.split('\\\\'):
+            for ln in seg.split('\n'):
+                ln = ln.strip().strip('&').strip()
+                # 清理下标/上标花括号内的空格（如 Q_{ego } → Q_{ego}）
+                ln = re.sub(r'([_^])\{([^{}]*)\}',
+                            lambda m: m.group(1) + '{' + m.group(2).strip() + '}', ln)
+                # Office LaTeX 不支持 \ （反斜杠空格）→ 换成受支持的 \,
+                ln = ln.replace('\\ ', '\\,')
+                if ln:
+                    # 行尾标点移到公式外，避免 OneNote 产生空公式对象
+                    tail = ''
+                    m2 = re.match(r'^(.*?)([,.;:，。；])$', ln)
+                    if m2 and m2.group(1).strip():
+                        ln, tail = m2.group(1).strip(), m2.group(2)
+                    lines.append(f'\\({ln}\\){tail}')
+        # 公式行之间插入空行：OneNote 会把连续多行公式合并成一个对齐
+        # 公式数组渲染，其结构会产生空方框；空行分隔则每行独立成段
+        return '\n\n'.join(lines)
+    return re.sub(r'\\\((.*?)\\\)', _split, md, flags=re.S)
+
+
+# ---------------- Zotero Better Notes 兼容输出 ----------------
+def _zotero_latex(latex):
+    """LaTeX → Zotero Better Notes（KaTeX）兼容写法：
+    去 \\left/\\right 修饰（集合保持 \\{ \\}）、折叠嵌套 \\operatorname、
+    裸多字母函数名转 \\operatorname、下标上标不转义"""
+    # KaTeX 支持 \operatorname，不转 \mathrm
+    latex = _sanitize_latex(latex, to_mathrm=False)
+    # \left/\right 修饰去除：\left\{ → \{（保留定界符前的反斜杠）、\left( → (
+    latex = re.sub(r'\\left(\\?[({\[])', r'\1', latex)
+    latex = re.sub(r'\\right(\\?[)}\]])', r'\1', latex)
+    latex = re.sub(r'\\left\.|\\right\.', '', latex)
+    # 嵌套 \operatorname 折叠（如 \operatorname{(\operatorname{X})} → \operatorname{X}）
+    prev = None
+    while prev != latex:
+        prev = latex
+        latex = re.sub(r'\\operatorname\{\\operatorname\{([^{}]*)\}\}',
+                       r'\\operatorname{\1}', latex)
+        latex = re.sub(r'\\operatorname\{\(\\operatorname\{([^{}]*)\}\)\}',
+                       r'\\operatorname{\1}', latex)
+    # 裸多字母函数名 → \operatorname{...}（排除反斜杠命令与已有容器内部）
+    latex = re.sub(r'(?<![\\A-Za-z{])([A-Za-z]{2,})\(',
+                   r'\\operatorname{\1}(', latex)
+    # 下标/上标不得转义（KaTeX 中 \_ 是字面下划线，不是下标）
+    latex = latex.replace('\\_', '_').replace('\\^', '^')
+    return latex.strip()
+
+
+def md_to_zotero(md):
+    """Markdown → Zotero Better Notes 兼容 Markdown 源文本：
+    行内公式统一 $...$（单字母无上下标公式两侧不加空格）、
+    独立公式统一 $$…$$ 且单独成行（前后空行）；禁止 \\(…\\)、\\[…\\]；
+    公式不进代码块；标题/列表/表格等 Markdown 结构原样保留"""
+    text = md.replace('\r\n', '\n').replace('\r', '\n')
+    text = _strip_hr_lines(text)
+    text, store = _protect(text)
+    out = []
+
+    def emit_display(seg):
+        latex = _zotero_latex(seg['latex'])
+        if out and out[-1].strip():
+            out.append('')  # 与前文空行分隔
+        out.append('$$')
+        out.extend(latex.split('\n') or [''])
+        out.append('$$')
+        out.append('')
+
+    for line in text.split('\n'):
+        pieces = PH_RE.split(line)
+        cur = ''
+        for k, piece in enumerate(pieces):
+            if k % 2 == 0:
+                cur += piece
+                continue
+            seg = store[int(piece)]
+            if seg['kind'] == 'code':
+                # 代码原样保留：多行 → ``` 围栏块；单行 → 行内代码
+                if '\n' in seg['text']:
+                    if cur.strip():
+                        out.append(cur)
+                        cur = ''
+                    out.append('```')
+                    out.extend(seg['text'].split('\n'))
+                    out.append('```')
+                    out.append('')
+                else:
+                    cur += f'`{seg["text"]}`'
+                continue
+            if seg['display']:
+                if cur.strip():
+                    out.append(cur)
+                    cur = ''
+                emit_display(seg)
+                continue
+            latex = _zotero_latex(seg['latex'])
+            if '\\begin{' in latex:
+                # aligned/cases 等环境按独立公式输出（$$ 块，KaTeX 渲染为多行对齐）
+                if cur.strip():
+                    out.append(cur)
+                    cur = ''
+                if out and out[-1].strip():
+                    out.append('')
+                out.append('$$')
+                out.extend(latex.split('\n') or [''])
+                out.append('$$')
+                out.append('')
+                continue
+            cur += f'${latex}$'
+        out.append(cur)
+    res = '\n'.join(out)
+    # 行内公式与中文之间的空格去除（与 AI 提示词输出样式一致：其中$Q_p$表示…）
+    _cjk = r'[\u4e00-\u9fff，。；：、（）【】《》“”]'
+    res = re.sub(rf'(?<={_cjk}) (\$[^$\n]{{1,80}}\$)', r'\1', res)
+    res = re.sub(rf'(\$[^$\n]{{1,80}}\$) (?={_cjk})', r'\1', res)
+    # 单字母无上下标公式：$ 与前后正文之间不加空格（Better Notes 解析兼容）
+    res = re.sub(r' \$([A-Za-z])\$', r'$\1$', res)
+    res = re.sub(r'\$([A-Za-z])\$ ', r'$\1$', res)
+    res = re.sub(r'\n{3,}', '\n\n', res)
+    return res.strip()
+
+
 # ---------------- 最终输出 ----------------
 def md_to_text(md):
     """Markdown → 纯文本；公式保持 $...$ / $$...$$ 原文"""
@@ -698,6 +892,9 @@ def _mathml_to_omml(mathml, display=False):
     display 块级公式外包 oMathPara；失败抛异常"""
     # 剥掉 pandoc 内嵌的原始 LaTeX 注释节点（mathml2omml 不认识且会污染回退文本）
     mathml = re.sub(r'<annotation[^>]*>.*?</annotation>', '', mathml, flags=re.S)
+    # pandoc 的 aligned 环境：& 前的空对齐列生成空 <mtd>，转成 OMML 后
+    # 在 OneNote 中渲染为空公式方框（每行一个）→ 删除空单元格
+    mathml = re.sub(r'<mtd[^>]*>\s*</mtd>', '', mathml)
     omml = mathml2omml.convert(mathml, name2codepoint)
     omml = omml.replace('<m:box><m:e>', '').replace('</m:e></m:box>', '')
     m = re.match(r'^<m:oMath[^>]*>(.*)</m:oMath>$', omml, flags=re.S)
@@ -858,9 +1055,11 @@ def _office_math_html(md, *, keep, hsize, hfont, keep_bold,
     优先 Pandoc（语法覆盖广、公式支持矩阵等复杂结构），无 Pandoc 时用内置转换器"""
     pandoc = _find_pandoc()
     if pandoc:
-        # 压平列表（消除圆点、应用自动编号）并规范化公式分隔符；
+        # 行内代码包裹的 $...$ 公式先解包（pandoc 按规范不转换代码内公式），
+        # 再过滤分隔线行、压平列表（消除圆点、应用自动编号）并规范化公式分隔符；
         # 复刻模式不压平，保留 Markdown 原生列表形态
-        md2 = md if keep else _flatten_lists(_fix_math_delimiters(md))
+        md2 = _strip_hr_lines(_unwrap_code_math_spans(md))
+        md2 = md2 if keep else _flatten_lists(_fix_math_delimiters(md2))
         body = _replace_mathml_with_omml(_pandoc_md_to_mathml_html(md2))
         if not (keep_bold or keep):  # 复刻模式强制保留加粗
             body = _strip_html_bold(body)
@@ -986,6 +1185,7 @@ OUT_FONT = ('Consolas', 11)
 RICH_LABEL = '复制（公式可编辑）'
 IMG_LABEL = '复制（公式为图片）'
 PLAIN_LABEL = '复制源MD'
+ZOTERO_LABEL = '复制（Zotero笔记）'
 
 def _app_dir():
     """程序所在目录：打包成 exe 后 __file__ 指向临时解压目录，须用 exe 路径"""
@@ -1126,6 +1326,9 @@ class App:
         self.btn_copy = ttk.Button(bar, text=PLAIN_LABEL, command=self.copy_result,
                                    width=14)
         self.btn_copy.pack(side='left', padx=(8, 0))
+        self.btn_zotero = ttk.Button(bar, text=ZOTERO_LABEL,
+                                     command=self.copy_zotero, width=18)
+        self.btn_zotero.pack(side='left', padx=(8, 0))
         hint = ('支持拖入MD文件；粘贴时请使用保留源格式粘贴；'
                 '内容与设置自动记忆')
         if not _HAS_DND:  # 缺少拖拽组件时不误导用户
@@ -1372,11 +1575,29 @@ class App:
         self.root.after(1500, lambda: btn.config(text=restore_label))
 
     def copy_result(self):
-        """复制输入框中的 Markdown 源文本（原样，不做任何转换）"""
-        src = self.in_tb.get('1.0', 'end-1c')
+        """复制输入框中的 Markdown 源文本；
+        非标准多行 \\(...\\) 公式块（aligned 包 \\(...\\)）自动拆行修复，
+        避免 OneNote 粘贴后出现空公式方框"""
+        src = _strip_hr_lines(_repair_multiline_paren_math(
+            _unwrap_code_math_spans(self.in_tb.get('1.0', 'end-1c'))))
         self.root.clipboard_clear()
         self.root.clipboard_append(src)
         self._flash(self.btn_copy, '已复制源MD ✓', PLAIN_LABEL)
+
+    def copy_zotero(self):
+        """Markdown → Zotero Better Notes 兼容 Markdown（公式规范为 $/$$，
+        免去每次给 AI 手写格式提示词），以纯文本写入剪贴板"""
+        src = self.in_tb.get('1.0', 'end-1c')
+        self.btn_zotero.config(text='正在转换…')
+        self.root.update_idletasks()
+        try:
+            zmd = md_to_zotero(src)
+            self.root.clipboard_clear()
+            self.root.clipboard_append(zmd)
+        except Exception as e:
+            self._flash(self.btn_zotero, f'失败:{e}', ZOTERO_LABEL)
+            return
+        self._flash(self.btn_zotero, '已复制 ✓ 粘贴到笔记', ZOTERO_LABEL)
 
     def _font_size_val(self):
         """字号设置的数值（非法输入回退 12 磅）"""
