@@ -25,6 +25,7 @@ import unicodedata
 from ctypes import wintypes
 from html.entities import name2codepoint
 import tkinter as tk
+from tkinter import messagebox
 from tkinter import filedialog, ttk
 
 try:
@@ -1352,6 +1353,13 @@ PLAIN_LABEL = '复制源MD'
 ZOTERO_LABEL = '复制（Zotero笔记）'
 # 自动复制可选方式（下拉框顺序即显示顺序）
 AUTO_COPY_MODES = (RICH_LABEL, IMG_LABEL, ZOTERO_LABEL, PLAIN_LABEL)
+# 底部复制按钮清单：key(配置键)/设置面板短标签/按钮文字/固定宽度（默认全部显示）
+COPY_BUTTON_SPECS = (
+    ('rich', '公式可编辑', RICH_LABEL, 20),
+    ('img', '公式为图片', IMG_LABEL, 20),
+    ('plain', '纯文本', PLAIN_LABEL, 14),
+    ('zotero', 'Zotero笔记', ZOTERO_LABEL, 18),
+)
 
 def _app_dir():
     """程序所在目录：打包成 exe 后 __file__ 指向临时解压目录，须用 exe 路径"""
@@ -1426,6 +1434,11 @@ class App:
         # 中文语境的 $X$ 配对有缺陷，详见 WRAP_SINGLE_LETTERS 注释）
         self.var_wrap_single = tk.BooleanVar(value=bool(cfg.get('wrap_single')))
         globals()['WRAP_SINGLE_LETTERS'] = self.var_wrap_single.get()
+        # 底部复制按钮显示开关（默认全部显示；粘贴设置中可勾选）
+        self.var_show_btn = {
+            key: tk.BooleanVar(value=bool(
+                cfg.get('copy_buttons', {}).get(key, True)))
+            for key, _, _, _ in COPY_BUTTON_SPECS}
 
         # 文件菜单：打开 / 保存输入 / 保存结果
         menubar = tk.Menu(root)
@@ -1492,20 +1505,21 @@ class App:
             self.out_tb.tag_configure(f'h{lv}', font=(OUT_FONT[0], size, 'bold'))
 
         # 底部按钮栏（固定宽度：状态文本变化时按钮不伸缩，右侧按钮不位移）
+        # 显示哪几种复制按钮由粘贴设置控制（默认全部显示；按钮始终创建，
+        # 隐藏只是不排布，_flash 状态提示仍可用）
         bar = ttk.Frame(outer)
         bar.pack(fill='x', pady=(8, 0))
         self.btn_rich = ttk.Button(bar, text=RICH_LABEL, command=self.copy_rich,
                                    width=20)
-        self.btn_rich.pack(side='left')
         self.btn_img = ttk.Button(bar, text=IMG_LABEL, command=self.copy_rich_img,
                                   width=20)
-        self.btn_img.pack(side='left', padx=(8, 0))
         self.btn_copy = ttk.Button(bar, text=PLAIN_LABEL, command=self.copy_result,
                                    width=14)
-        self.btn_copy.pack(side='left', padx=(8, 0))
         self.btn_zotero = ttk.Button(bar, text=ZOTERO_LABEL,
                                      command=self.copy_zotero, width=18)
-        self.btn_zotero.pack(side='left', padx=(8, 0))
+        self.btn_by_key = {'rich': self.btn_rich, 'img': self.btn_img,
+                           'plain': self.btn_copy, 'zotero': self.btn_zotero}
+        self._apply_visible_buttons()
         hint = ('支持拖入MD文件；粘贴时请使用保留源格式粘贴；'
                 '内容与设置自动记忆')
         if not _HAS_DND:  # 缺少拖拽组件时不误导用户
@@ -1602,6 +1616,7 @@ class App:
             'auto_copy': self.var_auto_copy.get(),
             'auto_copy_mode': self.var_auto_mode.get(),
             'wrap_single': self.var_wrap_single.get(),
+            'copy_buttons': {k: v.get() for k, v in self.var_show_btn.items()},
         })
         self.root.destroy()
 
@@ -1860,7 +1875,9 @@ class App:
                   self.var_keep_bold.get(), self.var_sp_before.get(),
                   self.var_sp_after.get(), self.var_font_keep.get(),
                   self.var_auto_copy.get(), self.var_auto_mode.get(),
-                  self.var_wrap_single.get())
+                  self.var_wrap_single.get(),
+                  *(self.var_show_btn[k].get()
+                    for k, _, _, _ in COPY_BUTTON_SPECS))
         win = tk.Toplevel(self.root)
         win.title('粘贴设置')
         win.resizable(False, False)
@@ -1941,13 +1958,21 @@ class App:
             text='单字母变量识别为公式（B、j 等裸字母自动转 $B$、$j$；'
                  '若粘贴后公式错位请关闭）')
         ck_wrap.grid(row=9, column=0, columnspan=4, sticky='w', pady=4)
+        # 底部复制按钮显示（默认全部勾选；至少保留一种，确定时校验）
+        ttk.Label(body, text='底部复制按钮：').grid(
+            row=10, column=0, sticky='w', pady=4)
+        btnsel = ttk.Frame(body)
+        btnsel.grid(row=10, column=1, columnspan=3, sticky='w', pady=4)
+        for key, short, _, _ in COPY_BUTTON_SPECS:
+            ttk.Checkbutton(btnsel, variable=self.var_show_btn[key],
+                            text=short).pack(side='left', padx=(0, 8))
         ttk.Label(body, foreground='#666',
                   text='对「公式可编辑」「公式为图片」两种复制的粘贴效果生效；'
                        '段前/段后与行距两种模式均生效；'
                        '复刻模式：保留 Word 默认分级字号'
-                  ).grid(row=10, column=0, columnspan=4, sticky='w', pady=(6, 0))
+                  ).grid(row=11, column=0, columnspan=4, sticky='w', pady=(6, 0))
         btns = ttk.Frame(body)
-        btns.grid(row=11, column=0, columnspan=4, sticky='e', pady=(10, 0))
+        btns.grid(row=12, column=0, columnspan=4, sticky='e', pady=(10, 0))
         ttk.Button(btns, text='确定',
                    command=lambda: self._apply_settings(win)).pack(side='left', padx=4)
         ttk.Button(btns, text='取消',
@@ -1960,9 +1985,23 @@ class App:
         win.geometry(f'+{(sw - w) // 2}+{(sh - h) // 2}')
         win.grab_set()
 
+    def _apply_visible_buttons(self):
+        """按粘贴设置重新排布底部复制按钮（隐藏的按钮不销毁）"""
+        first = True
+        for key, _, _, _ in COPY_BUTTON_SPECS:
+            btn = self.btn_by_key[key]
+            btn.pack_forget()
+            if self.var_show_btn[key].get():
+                btn.pack(side='left', padx=(0 if first else 8, 0))
+                first = False
+
     def _apply_settings(self, win):
         """粘贴设置确定：同步模块级开关并关闭弹窗"""
+        if not any(v.get() for v in self.var_show_btn.values()):
+            messagebox.showinfo('提示', '至少保留一种复制方式')
+            return
         globals()['WRAP_SINGLE_LETTERS'] = self.var_wrap_single.get()
+        self._apply_visible_buttons()
         win.destroy()
 
     def _restore_settings(self, backup, win):
@@ -1978,6 +2017,8 @@ class App:
         self.var_auto_copy.set(backup[8])
         self.var_auto_mode.set(backup[9])
         self.var_wrap_single.set(backup[10])
+        for i, (key, _, _, _) in enumerate(COPY_BUTTON_SPECS, start=11):
+            self.var_show_btn[key].set(backup[i])
         win.destroy()
 
     def copy_rich(self):
