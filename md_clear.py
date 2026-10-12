@@ -129,16 +129,19 @@ _CJK_CTX_RE = re.compile(r'[\u4e00-\u9fff，。；：、（）【】《》“”
 _ASCII_WORD_RE = re.compile(r'[A-Za-z0-9]')
 
 
-def _wrap_in_prose(seg):
-    """把紧邻中文语境的孤立单英文字母包成 $...$；
-    贴着字母/数字/下划线/命令符的（KV、token、B1、q_i、\\ell）不动"""
+def _wrap_in_prose(seg, prev_ch='', next_ch=''):
+    """把紧邻中文语境的孤立单英文字母包成 $...$，两侧确保有空格
+    （Better Notes 实测：带空格的 $B$ 可正确渲染，紧贴中文的会被
+    误配进公式）；贴着字母/数字/下划线/命令符的（KV、token、B1、q_i、
+    \\ell）不动；prev_ch/next_ch 为片段两侧紧邻的字符（通常是相邻
+    公式/代码块的边界符），用于避免包裹出 $X$$Y$ 这类歧义序列"""
     out = []
     pos = 0
     for m in re.finditer(r'[A-Za-z]', seg):
         i = m.start()
         ch = m.group(0)
-        prev = seg[i - 1] if i else ''
-        nxt = seg[i + 1] if i + 1 < len(seg) else ''
+        prev = seg[i - 1] if i else prev_ch
+        nxt = seg[i + 1] if i + 1 < len(seg) else next_ch
         cjk = lambda c: bool(c) and bool(_CJK_CTX_RE.match(c))
         # 单词/记号边界：排除多字母词、下标、命令、已带 $ 的成分
         if prev and (_ASCII_WORD_RE.match(prev) or prev in '_\\{}^$'):
@@ -153,26 +156,36 @@ def _wrap_in_prose(seg):
                     and (cjk(p2) or p2 == '|') and (cjk(n2) or n2 == '|')):
                 continue
         out.append(seg[pos:i])
+        if prev and not prev.isspace():
+            out.append(' ')
         out.append(f'${ch}$')
+        if nxt and not nxt.isspace():
+            out.append(' ')
         pos = i + 1
     out.append(seg[pos:])
     return ''.join(out)
 
 
 def _wrap_standalone_letters(md):
-    """自动识别裸文本单字母变量并包成 $...$（跳过代码块/行内代码/已有公式）；
+    """转换完成后的后处理：识别最终文本中裸露的单字母变量（26 个大小写
+    字母，紧邻中文语境才认定），左右用 $ 包裹并确保两侧有空格。
+    已有公式 $...$/$$ 块、行内代码、围栏代码块整体跳过——其内部的字母
+    一律不动；紧贴这些块边界的裸字母也不包裹（避免 $X$$Y$ 歧义序列）。
     纯英文语境（冠词 a、代词 I、A. 选项标号）因无中文邻接不会命中。
     默认关闭（见 WRAP_SINGLE_LETTERS）：部分渲染器对紧邻中文的 $X$ 配对
-    存在缺陷，会把闭合符跳过、与后续公式误配成大片段"""
+    存在缺陷，带空格的形式已实测可正确渲染"""
     if not WRAP_SINGLE_LETTERS or not re.search(r'[A-Za-z]', md):
         return md
     out = []
     pos = 0
+    last_ch = ''  # 上一个跳过片段的末字符（作为下一段的左边界）
     for m in _SKIP_SPAN_RE.finditer(md):
-        out.append(_wrap_in_prose(md[pos:m.start()]))
+        prev_ch = md[pos - 1] if pos else ''
+        out.append(_wrap_in_prose(md[pos:m.start()], prev_ch, m.group(0)[:1]))
         out.append(m.group(0))
         pos = m.end()
-    out.append(_wrap_in_prose(md[pos:]))
+        last_ch = m.group(0)[-1]
+    out.append(_wrap_in_prose(md[pos:], last_ch, ''))
     return ''.join(out)
 
 
@@ -504,8 +517,6 @@ def _convert(md):
     # 非标准 aligned 包 \(...\) 块拆行：mathtext（图片/预览）不支持
     # \begin{aligned} 环境，整块渲染会失败回退为原始文本
     text = _repair_multiline_paren_math(text)
-    # 裸文本单字母变量 → $...$（紧邻中文语境才认定，见函数说明）
-    text = _wrap_standalone_letters(text)
     text, store = _protect(text)
 
     lines = text.split('\n')
@@ -768,8 +779,6 @@ def md_to_zotero(md):
     公式不进代码块；标题/列表/表格等 Markdown 结构原样保留"""
     text = md.replace('\r\n', '\n').replace('\r', '\n')
     text = _strip_hr_lines(text)
-    # 裸文本单字母变量 → $...$（紧邻中文语境才认定）
-    text = _wrap_standalone_letters(text)
     text, store = _protect(text)
     out = []
 
@@ -841,6 +850,8 @@ def md_to_zotero(md):
     # 造成 $ 错位显示。在需要的一侧补一个空格恢复配对（$O(N)$ 大小）。
     # `\` 开头的命令（$\ell$…）实测可正常配对，保持无空格不动
     res = _fix_math_flank(res)
+    # 单字母变量后处理（粘贴设置可开启）：裸字母左右加 $ 并留空格
+    res = _wrap_standalone_letters(res)
     res = re.sub(r'\n{3,}', '\n\n', res)
     return res.strip()
 
@@ -916,7 +927,7 @@ def md_to_text(md):
         if l == '' and squeezed and squeezed[-1] == '':
             continue
         squeezed.append(l)
-    result = '\n'.join(squeezed).strip('\n')
+    result = _wrap_standalone_letters('\n'.join(squeezed).strip('\n'))
     return result + '\n' if result else ''
 
 
@@ -1213,8 +1224,6 @@ def _office_math_html(md, *, keep, hsize, hfont, keep_bold,
         # 复刻模式不压平，保留 Markdown 原生列表形态
         md2 = _strip_hr_lines(_unwrap_code_math_spans(md))
         md2 = md2 if keep else _flatten_lists(_fix_math_delimiters(md2))
-        # 裸文本单字母变量 → $...$（紧邻中文语境才认定）
-        md2 = _wrap_standalone_letters(md2)
         body = _replace_mathml_with_omml(_pandoc_md_to_mathml_html(md2))
         if not (keep_bold or keep):  # 复刻模式强制保留加粗
             body = _strip_html_bold(body)
