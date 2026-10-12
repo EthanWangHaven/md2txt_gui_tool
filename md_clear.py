@@ -2225,7 +2225,10 @@ class App:
         self._float_poll()
 
     def _float_settle(self):
-        """常驻监听：记录基线并开始持续轮询（无需先点亮）"""
+        """完成展示后回落：常驻模式→继续监听；未开常驻→熄灭"""
+        if not getattr(self, '_float_resident', False):
+            self._float_idle()
+            return
         try:
             self._float_last = self.root.clipboard_get()
         except tk.TclError:
