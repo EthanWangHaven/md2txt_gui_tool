@@ -57,8 +57,10 @@ def _display_width(s):
 
 def _fix_math_delimiters(text):
     """公式分隔符规范化（修复 AI 输出的非标准写法，代码块已先被占位符保护）"""
-    # $ x $ 内侧带空格 → $x$（否则下方 $ 正则不匹配，公式原样残留）
-    text = re.sub(r'(?<!\$)\$(?!\$)[ \t]+([^\n$]+?)[ \t]+(?<!\$)\$(?!\$)',
+    # $ x $ 内侧带空格 → $x$（否则下方 $ 正则不匹配，公式原样残留）。
+    # 开 $ 前不能是字母/数字/}/)/]——那种 $ 必然是上一个公式的闭合符，
+    # 否则 `$A_{ij}$ ：正文 $q_i$` 会把两句之间的正文当成"内侧空格"吞掉
+    text = re.sub(r'(?<![A-Za-z0-9})\]])\$(?!\$)[ \t]+([^\n$]+?)[ \t]+(?<!\$)\$(?!\$)',
                   r'$\1$', text)
     # 单独成行的成对 $ → $$（非标准块级公式分隔符）
     lines = text.split('\n')
@@ -105,6 +107,68 @@ def _unwrap_code_math_spans(text):
     for i, b in enumerate(blocks):
         text = text.replace(f'{PH_OPEN}B{i}{PH_CLOSE}', b)
     return text
+
+
+# 网页复制的 AI 笔记里，单字母变量常是裸文本（如 "- B：块大小"、"第j个"），
+# 与 $K_j$ 等真公式混排显得扁平。跳过区：代码块/行内代码/已有公式内部不动
+_SKIP_SPAN_RE = re.compile(
+    r'```[\s\S]*?(?:```|\Z)'      # 围栏代码块（未闭合也算）
+    r'|`[^`\n]+`'                 # 行内代码
+    r'|\$\$[\s\S]*?\$\$'          # $$ 块公式
+    r'|\$[^$\n]+\$'               # $ 行内公式
+    r'|\\\([\s\S]*?\\\)'          # \(...\) 行内公式
+    r'|\\\[[\s\S]*?\\\]'          # \[...\] 块公式
+    r'|\\\$'                      # 转义 \$，防止其后的 $ 被误配成公式
+)
+# 中文语境字符：汉字与常用中文标点（用于判断字母是否处于中文叙述中）
+_CJK_CTX_RE = re.compile(r'[\u4e00-\u9fff，。；：、（）【】《》“”‘’—…～·]')
+# ASCII 单词字符（注意：str.isalnum() 对中文也返回 True，不能用它做边界判断）
+_ASCII_WORD_RE = re.compile(r'[A-Za-z0-9]')
+
+
+def _wrap_in_prose(seg):
+    """把紧邻中文语境的孤立单英文字母包成 $...$；
+    贴着字母/数字/下划线/命令符的（KV、token、B1、q_i、\\ell）不动"""
+    out = []
+    pos = 0
+    for m in re.finditer(r'[A-Za-z]', seg):
+        i = m.start()
+        ch = m.group(0)
+        prev = seg[i - 1] if i else ''
+        nxt = seg[i + 1] if i + 1 < len(seg) else ''
+        cjk = lambda c: bool(c) and bool(_CJK_CTX_RE.match(c))
+        # 单词/记号边界：排除多字母词、下标、命令、已带 $ 的成分
+        if prev and (_ASCII_WORD_RE.match(prev) or prev in '_\\{}^$'):
+            continue
+        if nxt and (_ASCII_WORD_RE.match(nxt) or nxt in '_\\{}^$'):
+            continue
+        if not (cjk(prev) or cjk(nxt)):
+            # "存放 B 个"：两侧隔一个空格后均为中文语境（表格竖线也算）
+            p2 = seg[i - 2] if i >= 2 else ''
+            n2 = seg[i + 2] if i + 2 < len(seg) else ''
+            if not (prev in ('', ' ') and nxt in ('', ' ')
+                    and (cjk(p2) or p2 == '|') and (cjk(n2) or n2 == '|')):
+                continue
+        out.append(seg[pos:i])
+        out.append(f'${ch}$')
+        pos = i + 1
+    out.append(seg[pos:])
+    return ''.join(out)
+
+
+def _wrap_standalone_letters(md):
+    """自动识别裸文本单字母变量并包成 $...$（跳过代码块/行内代码/已有公式）；
+    纯英文语境（冠词 a、代词 I、A. 选项标号）因无中文邻接不会命中"""
+    if not re.search(r'[A-Za-z]', md):
+        return md
+    out = []
+    pos = 0
+    for m in _SKIP_SPAN_RE.finditer(md):
+        out.append(_wrap_in_prose(md[pos:m.start()]))
+        out.append(m.group(0))
+        pos = m.end()
+    out.append(_wrap_in_prose(md[pos:]))
+    return ''.join(out)
 
 
 def _math_like_block(inner):
@@ -435,6 +499,8 @@ def _convert(md):
     # 非标准 aligned 包 \(...\) 块拆行：mathtext（图片/预览）不支持
     # \begin{aligned} 环境，整块渲染会失败回退为原始文本
     text = _repair_multiline_paren_math(text)
+    # 裸文本单字母变量 → $...$（紧邻中文语境才认定，见函数说明）
+    text = _wrap_standalone_letters(text)
     text, store = _protect(text)
 
     lines = text.split('\n')
@@ -697,6 +763,8 @@ def md_to_zotero(md):
     公式不进代码块；标题/列表/表格等 Markdown 结构原样保留"""
     text = md.replace('\r\n', '\n').replace('\r', '\n')
     text = _strip_hr_lines(text)
+    # 裸文本单字母变量 → $...$（紧邻中文语境才认定）
+    text = _wrap_standalone_letters(text)
     text, store = _protect(text)
     out = []
 
@@ -758,9 +826,10 @@ def md_to_zotero(md):
     _cjk = r'[\u4e00-\u9fff，。；：、（）【】《》“”]'
     res = re.sub(rf'(?<={_cjk}) (\$[^$\n]{{1,80}}\$)', r'\1', res)
     res = re.sub(rf'(\$[^$\n]{{1,80}}\$) (?={_cjk})', r'\1', res)
-    # 单字母无上下标公式：$ 与前后正文之间不加空格（Better Notes 解析兼容）
-    res = re.sub(r' \$([A-Za-z])\$', r'$\1$', res)
-    res = re.sub(r'\$([A-Za-z])\$ ', r'$\1$', res)
+    # 单字母无上下标公式：$ 与前后正文之间不加空格，但仅限中文语境
+    # （列表标记后的空格不能吃：`- $B$：` 会破坏 Markdown 列表语法）
+    res = re.sub(rf'(?<={_cjk}) \$([A-Za-z])\$', r'$\1$', res)
+    res = re.sub(rf'\$([A-Za-z])\$ (?={_cjk})', r'$\1$', res)
     # 行内公式 flanking 修复：Better Notes（markdown-it-katex）按 CommonMark
     # flanking 规则判断 $ 配对——公式边界是标点（如 $O(N)$ 的 `)`）且另一侧
     # 紧贴文字（如 `大小`）时，闭合 $ 判定失败，会把后续一段正文吞进公式，
@@ -1139,6 +1208,8 @@ def _office_math_html(md, *, keep, hsize, hfont, keep_bold,
         # 复刻模式不压平，保留 Markdown 原生列表形态
         md2 = _strip_hr_lines(_unwrap_code_math_spans(md))
         md2 = md2 if keep else _flatten_lists(_fix_math_delimiters(md2))
+        # 裸文本单字母变量 → $...$（紧邻中文语境才认定）
+        md2 = _wrap_standalone_letters(md2)
         body = _replace_mathml_with_omml(_pandoc_md_to_mathml_html(md2))
         if not (keep_bold or keep):  # 复刻模式强制保留加粗
             body = _strip_html_bold(body)
