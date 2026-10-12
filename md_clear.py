@@ -1265,6 +1265,8 @@ RICH_LABEL = '复制（公式可编辑）'
 IMG_LABEL = '复制（公式为图片）'
 PLAIN_LABEL = '复制源MD'
 ZOTERO_LABEL = '复制（Zotero笔记）'
+# 自动复制可选方式（下拉框顺序即显示顺序）
+AUTO_COPY_MODES = (RICH_LABEL, IMG_LABEL, ZOTERO_LABEL, PLAIN_LABEL)
 
 def _app_dir():
     """程序所在目录：打包成 exe 后 __file__ 指向临时解压目录，须用 exe 路径"""
@@ -1328,6 +1330,13 @@ class App:
         self.var_sp_after = tk.StringVar(value=str(cfg.get('sp_after') or 0))
         # 复刻 Markdown 排版：不设置字体字号加粗，标题/表头保持加粗（默认关闭）
         self.var_font_keep = tk.BooleanVar(value=bool(cfg.get('keep_markdown')))
+        # 自动复制：输入内容变化后自动按所选方式复制（默认关闭，方式默认公式可编辑）
+        self.var_auto_copy = tk.BooleanVar(value=bool(cfg.get('auto_copy')))
+        self.var_auto_mode = tk.StringVar(
+            value=str(cfg.get('auto_copy_mode') or RICH_LABEL))
+        if self.var_auto_mode.get() not in AUTO_COPY_MODES:
+            self.var_auto_mode.set(RICH_LABEL)
+        self._auto_src = None  # 上次自动复制的内容（去重，避免重复写剪贴板）
 
         # 文件菜单：打开 / 保存输入 / 保存结果
         menubar = tk.Menu(root)
@@ -1427,6 +1436,8 @@ class App:
 
         # 内容记忆：上次退出时的输入直接恢复，否则用示例
         self.in_tb.insert('1.0', cfg.get('text') if cfg.get('text') else DEMO)
+        # 启动恢复的内容不算“变化”，避免启动即覆盖用户剪贴板
+        self._auto_src = self.in_tb.get('1.0', 'end-1c')
         self.convert_now()
         root.protocol('WM_DELETE_WINDOW', self._on_close)
 
@@ -1499,6 +1510,8 @@ class App:
             'sp_before': self._sp_val(self.var_sp_before),
             'sp_after': self._sp_val(self.var_sp_after),
             'keep_markdown': self.var_font_keep.get(),
+            'auto_copy': self.var_auto_copy.get(),
+            'auto_copy_mode': self.var_auto_mode.get(),
         })
         self.root.destroy()
 
@@ -1544,6 +1557,28 @@ class App:
             self.out_tb.insert('end', f'（转换出错：{e}）')
         self.out_tb.configure(state='disabled')
         self.out_tb.yview_moveto(yview[0])
+        # 自动复制：内容变化（150ms 输入停顿）后按所选方式自动复制
+        if self.var_auto_copy.get():
+            self._auto_copy(src)
+
+    def _auto_copy(self, src):
+        """自动复制：输入内容变化后按「粘贴设置」所选方式复制到剪贴板；
+        空内容不覆盖剪贴板，内容未变化不重复复制"""
+        if not src.strip() or src == self._auto_src:
+            return
+        self._auto_src = src
+        mode = self.var_auto_mode.get()
+        try:
+            if mode == ZOTERO_LABEL:
+                self.copy_zotero()
+            elif mode == IMG_LABEL:
+                self.copy_rich_img()
+            elif mode == PLAIN_LABEL:
+                self.copy_result()
+            else:
+                self.copy_rich()
+        except Exception:
+            pass  # 自动复制失败不打断输入
 
     def _insert_line(self, line, store, heading_lv=0):
         """按行内格式与占位符分段插入：文本带格式 tag，公式渲染成图片插入"""
@@ -1729,11 +1764,12 @@ class App:
         win.grab_set()
 
     def open_settings(self):
-        """粘贴设置：中文字体/字号/标题字体/标题字号/正文加粗字段保留/段前段后/复刻 Markdown 排版"""
+        """粘贴设置：中文字体/字号/标题字体/标题字号/正文加粗字段保留/段前段后/复刻 Markdown 排版/自动复制"""
         backup = (self.var_font.get(), self.var_font_size.get(),
                   self.var_head_font.get(), self.var_head_size.get(),
                   self.var_keep_bold.get(), self.var_sp_before.get(),
-                  self.var_sp_after.get(), self.var_font_keep.get())
+                  self.var_sp_after.get(), self.var_font_keep.get(),
+                  self.var_auto_copy.get(), self.var_auto_mode.get())
         win = tk.Toplevel(self.root)
         win.title('粘贴设置')
         win.resizable(False, False)
@@ -1789,13 +1825,32 @@ class App:
 
         self.var_font_keep.trace_add('write', _sync_keep_state)
         _sync_keep_state()
+        # 自动复制：勾选后内容变化自动转换并复制；方式下拉仅勾选时可用
+        ttk.Label(body, text='自动复制：').grid(
+            row=7, column=0, sticky='w', pady=4)
+        ck_auto = ttk.Checkbutton(
+            body, variable=self.var_auto_copy,
+            text='勾选后输入内容变化时自动转换并复制到剪贴板')
+        ck_auto.grid(row=7, column=1, columnspan=3, sticky='w', pady=4)
+        ttk.Label(body, text='复制方式：').grid(
+            row=8, column=0, sticky='w', pady=4)
+        cb_auto = ttk.Combobox(body, textvariable=self.var_auto_mode, width=18,
+                               values=AUTO_COPY_MODES, state='readonly')
+        cb_auto.grid(row=8, column=1, sticky='w', pady=4)
+
+        def _sync_auto_state(*_):
+            cb_auto.state(('!disabled' if self.var_auto_copy.get()
+                           else 'disabled',))
+
+        self.var_auto_copy.trace_add('write', _sync_auto_state)
+        _sync_auto_state()
         ttk.Label(body, foreground='#666',
                   text='对「公式可编辑」「公式为图片」两种复制的粘贴效果生效；'
                        '段前/段后与行距两种模式均生效；'
                        '复刻模式：保留 Word 默认分级字号'
-                  ).grid(row=7, column=0, columnspan=4, sticky='w', pady=(6, 0))
+                  ).grid(row=9, column=0, columnspan=4, sticky='w', pady=(6, 0))
         btns = ttk.Frame(body)
-        btns.grid(row=8, column=0, columnspan=4, sticky='e', pady=(10, 0))
+        btns.grid(row=10, column=0, columnspan=4, sticky='e', pady=(10, 0))
         ttk.Button(btns, text='确定',
                    command=win.destroy).pack(side='left', padx=4)
         ttk.Button(btns, text='取消',
@@ -1818,6 +1873,8 @@ class App:
         self.var_sp_before.set(backup[5])
         self.var_sp_after.set(backup[6])
         self.var_font_keep.set(backup[7])
+        self.var_auto_copy.set(backup[8])
+        self.var_auto_mode.set(backup[9])
         win.destroy()
 
     def copy_rich(self):
