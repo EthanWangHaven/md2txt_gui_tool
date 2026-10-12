@@ -1450,9 +1450,14 @@ class App:
         file_menu.add_command(label='保存结果为纯文本…',
                               command=self.save_result)
         menubar.add_cascade(label='文件', menu=file_menu)
-        # 设置菜单：粘贴产物的默认字体 + 关于
+        # 设置菜单：粘贴产物的默认字体 + 悬浮窗模式 + 关于
         set_menu = tk.Menu(menubar, tearoff=0)
         set_menu.add_command(label='粘贴设置', command=self.open_settings)
+        # 悬浮窗模式（主窗口收起为圆形悬浮球，剪贴板监听自动转换复制；
+        # 默认不启用，手动勾选开启；状态不入配置——每次启动从正常模式开始）
+        self.var_float_win = tk.BooleanVar(value=False)
+        set_menu.add_checkbutton(label='悬浮窗模式', variable=self.var_float_win,
+                                 command=self._toggle_float_win)
         set_menu.add_separator()
         set_menu.add_command(label='关于', font=('Microsoft YaHei UI', 8),
                              command=self.show_about)
@@ -2020,6 +2025,384 @@ class App:
         for i, (key, _, _, _) in enumerate(COPY_BUTTON_SPECS, start=11):
             self.var_show_btn[key].set(backup[i])
         win.destroy()
+
+    # ==================== 悬浮窗模式 ====================
+    # 透明魔法色：画布底色（球体 PNG 的 alpha=0 区域露出该色）并声明
+    # -transparentcolor，球外像素完全透明且鼠标穿透；取中性灰以弱化
+    # 球体边缘半透明像素与底色混合产生的色晕
+    FLOAT_MAGIC = '#7F7F80'
+    _FLOAT_POLL_MS = 300     # 点亮后剪贴板轮询间隔
+    _FLOAT_DONE_MS = 2000    # 完成色显示时长（一次一收：之后回到熄灭）
+
+    def _toggle_float_win(self):
+        if self.var_float_win.get():
+            self._enter_float_win()
+        else:
+            self._exit_float_win()
+
+    def _enter_float_win(self):
+        """进入悬浮窗模式：主窗口收起，显示圆形悬浮球（置顶、可拖动）"""
+        cfg = _load_config()
+        self._float_size = int(cfg.get('float_size') or 48)
+        self._float_alpha = min(1.0, max(0.2, float(cfg.get('float_alpha') or 0.9)))
+        colors = cfg.get('float_colors') or {}
+        self._float_colors = {
+            'idle': colors.get('idle') or '#8A8F98',    # 熄灭待机
+            'armed': colors.get('armed') or '#2F7CF6',  # 点亮待接收
+            'done': colors.get('done') or '#34C759',    # 转换完成
+            'resident': colors.get('resident') or '#7B5BD6',  # 常驻监听
+        }
+        self._float_mode = str(cfg.get('float_mode') or self.var_auto_mode.get())
+        if self._float_mode not in AUTO_COPY_MODES:
+            self._float_mode = RICH_LABEL
+        self._float_resident = bool(cfg.get('float_resident', False))  # 常驻模式
+        self._float_state = 'idle'
+        self._float_last = None   # 点亮时的剪贴板基线
+        self._float_after = None  # 轮询 after 句柄
+        self._float_job = None    # 完成→熄灭定时
+        self._float_light = bool(cfg.get('float_light', True))  # 浅色/深色
+        self._float_img_cache = {}  # 球体贴图缓存 (state,light,size)→PhotoImage
+        self.root.withdraw()
+        sw, sh = self.root.winfo_screenwidth(), self.root.winfo_screenheight()
+        pos = cfg.get('float_pos')
+        if isinstance(pos, list) and len(pos) == 2:
+            x, y = int(pos[0]), int(pos[1])
+        else:  # 默认屏幕右下
+            x, y = sw - 120, sh - 180
+        x = max(0, min(x, sw - self._float_size))
+        y = max(0, min(y, sh - self._float_size))
+        self.float_win = tk.Toplevel(self.root)
+        self.float_win.overrideredirect(True)
+        self.float_win.attributes('-topmost', True)
+        for attr, val in (('-transparentcolor', self.FLOAT_MAGIC),
+                          ('-alpha', self._float_alpha)):
+            try:
+                self.float_win.attributes(attr, val)
+            except tk.TclError:
+                pass
+        self.float_win.geometry(
+            f'{self._float_size}x{self._float_size}+{x}+{y}')
+        self.float_cv = tk.Canvas(self.float_win, width=self._float_size,
+                                  height=self._float_size,
+                                  bg=self.FLOAT_MAGIC, highlightthickness=0,
+                                  bd=0)
+        self.float_cv.pack(fill='both', expand=True)
+        self._draw_float_ball()
+        # 拖动（位移>4px 判定为拖动）/ 单击点亮熄灭 / 右键设置菜单
+        self.float_cv.bind('<ButtonPress-1>', self._float_press)
+        self.float_cv.bind('<B1-Motion>', self._float_drag)
+        self.float_cv.bind('<ButtonRelease-1>', self._float_release)
+        self.float_cv.bind('<Button-3>', self._float_menu)
+        # 右键设置用的变量（带 trace 即时生效并落盘）
+        self._float_mode_var = tk.StringVar(value=self._float_mode)
+        self._float_mode_var.trace_add(
+            'write', lambda *_: self._float_apply('mode'))
+        self._float_alpha_var = tk.DoubleVar(value=self._float_alpha)
+        self._float_alpha_var.trace_add(
+            'write', lambda *_: self._float_apply('alpha'))
+        self._float_size_var = tk.IntVar(value=self._float_size)
+        self._float_size_var.trace_add(
+            'write', lambda *_: self._float_apply('size'))
+        self._float_light_var = tk.BooleanVar(value=self._float_light)
+        self._float_light_var.trace_add(
+            'write', lambda *_: self._float_apply('light'))
+        self._float_resident_var = tk.BooleanVar(value=self._float_resident)
+        self._float_resident_var.trace_add(
+            'write', lambda *_: self._float_apply('resident'))
+        if self._float_resident:
+            self._float_settle()  # 常驻模式：进入即持续监听
+
+    def _draw_float_ball(self):
+        """重绘悬浮球：整球随状态变色——熄灭=浅白/深灰（外观切换）、
+        点亮=点亮色、完成=完成色（右键可自定义后两种）；M↓ 图案与应用
+        图标同款。球体贴图用 PIL 4 倍超采样 + LANCZOS 缩小，边缘平滑"""
+        cv, s = self.float_cv, self._float_size
+        cv.delete('all')
+        cv.create_image(0, 0, anchor='nw',
+                        image=self._float_ball_image(self._float_state,
+                                                     self._float_light, s))
+
+    def _float_ball_image(self, state, light, size):
+        """渲染悬浮球贴图：径向渐变球体（中心亮、边缘泛状态色）+ 细描边 +
+        一体 M↓ 图案。4x 超采样绘制后 LANCZOS 缩小得到平滑边缘；
+        按 (state, light, size) 缓存"""
+        key = (state, light, size)
+        cached = self._float_img_cache.get(key)
+        if cached is not None:
+            return cached
+        import numpy as np
+        from PIL import Image, ImageDraw
+        try:
+            resample = Image.Resampling.LANCZOS
+        except AttributeError:  # 旧版 Pillow
+            resample = Image.LANCZOS
+
+        def mix(c1, c2, t):
+            return tuple(round(a * (1 - t) + b * t) for a, b in zip(c1, c2))
+
+        white, black = (255, 255, 255), (0, 0, 0)
+        if state == 'idle':
+            if light:  # 玻璃白球
+                c_in, c_out = (253, 254, 255), (214, 228, 247)
+                glyph, edge = (61, 107, 158), (185, 207, 234)
+            else:  # 深色玻璃球
+                c_in, c_out = (47, 53, 63), (32, 36, 44)
+                glyph, edge = (232, 236, 244), (74, 81, 96)
+        else:  # 点亮/完成：状态色玻璃球（颜色可在右键自定义）
+            base = self._float_colors[state]
+            base = tuple(int(base[i:i + 2], 16) for i in (1, 3, 5))
+            c_in, c_out = mix(white, base, 0.16), mix(white, base, 0.42)
+            glyph, edge = mix(base, black, 0.28), mix(base, black, 0.14)
+        k = 4
+        S = size * k
+        m = max(2, size // 16) * k       # 圆边距（4x）
+        R = S / 2 - m
+        cx = cy = S / 2
+        # 径向渐变 + 圆形蒙版（缩小后边缘自然抗锯齿）
+        yy, xx = np.mgrid[0:S, 0:S].astype(np.float64)
+        rr = np.sqrt((xx - cx) ** 2 + (yy - cy) ** 2) / R
+        t = np.clip(rr, 0, 1) ** 0.75
+        rgba = np.zeros((S, S, 4), np.uint8)
+        for i in range(3):
+            rgba[..., i] = c_in[i] * (1 - t) + c_out[i] * t
+        rgba[..., 3] = np.where(rr <= 1.0, 255, 0)
+        im = Image.fromarray(rgba, 'RGBA')
+        d = ImageDraw.Draw(im)
+        d.ellipse((m, m, S - m, S - m), outline=edge,
+                  width=max(2, S // 90))
+        # M↓ 一体图案（M 右竖延伸为箭头杆，与 app 图标同款）
+        # 图案包围盒 ~(0.28S,0.28S)-(0.72S,0.71S)，关于圆心 (0.5S,0.5S) 居中
+        d = ImageDraw.Draw(im)
+        w = max(2, int(S * 0.08))
+        top, bot, vy = S * 0.32, S * 0.60, S * 0.52
+        L, Rr, Cx = S * 0.32, S * 0.63, S * 0.475
+        d.line([(L, bot), (L, top), (Cx, vy), (Rr, top), (Rr, S * 0.585)],
+               fill=glyph, width=w, joint='curve')
+        hw = S * 0.09
+        d.polygon([(Rr - hw, S * 0.585), (Rr + hw, S * 0.585),
+                   (Rr, S * 0.71)], fill=glyph)
+        im = im.resize((size, size), resample)
+        buf = io.BytesIO()
+        im.save(buf, 'PNG')
+        img = tk.PhotoImage(data=base64.b64encode(buf.getvalue()))
+        self._float_img_cache[key] = img
+        return img
+
+    def _float_press(self, e):
+        self._float_dx, self._float_dy = e.x, e.y
+        self._float_moved = False
+
+    def _float_drag(self, e):
+        if abs(e.x - self._float_dx) + abs(e.y - self._float_dy) > 4:
+            self._float_moved = True
+        if self._float_moved:
+            self.float_win.geometry(
+                f'+{self.float_win.winfo_x() + e.x - self._float_dx}'
+                f'+{self.float_win.winfo_y() + e.y - self._float_dy}')
+
+    def _float_release(self, e):
+        if self._float_moved:  # 拖动结束：记住位置
+            self._float_save()
+            return
+        if self._float_state == 'done':
+            return  # 完成展示期单击不响应
+        if self._float_state == 'idle':  # 单击：点亮（常驻模式则直接监听）
+            if self._float_resident:
+                self._float_settle()
+            else:
+                self._float_arm()
+        else:  # 再单击：熄灭（常驻监听中单击=暂停）
+            self._float_idle()
+
+    def _float_arm(self):
+        """点亮：记录剪贴板基线并开始轮询（一次一收）"""
+        try:
+            self._float_last = self.root.clipboard_get()
+        except tk.TclError:
+            self._float_last = None
+        self._float_state = 'armed'
+        self._draw_float_ball()
+        self._float_poll()
+
+    def _float_settle(self):
+        """常驻监听：记录基线并开始持续轮询（无需先点亮）"""
+        try:
+            self._float_last = self.root.clipboard_get()
+        except tk.TclError:
+            self._float_last = None
+        self._float_state = 'resident'
+        self._draw_float_ball()
+        self._float_poll()
+
+    def _float_idle(self):
+        """熄灭：停止轮询与定时"""
+        for handle in ('_float_after', '_float_job'):
+            if getattr(self, handle, None):
+                self.root.after_cancel(getattr(self, handle))
+                setattr(self, handle, None)
+        if getattr(self, 'float_win', None):
+            self._float_state = 'idle'
+            self._draw_float_ball()
+
+    def _float_poll(self):
+        """轮询剪贴板：发现新文本（任意应用里 Ctrl+C 的结果）即接收。
+        点亮=一次一收；常驻模式=持续监听不停止"""
+        try:
+            text = self.root.clipboard_get()
+        except tk.TclError:
+            text = None
+        if text and text.strip() and text != self._float_last:
+            self._float_after = None
+            self._float_capture(text)
+            return
+        if self._float_state in ('armed', 'resident'):
+            self._float_after = self.root.after(self._FLOAT_POLL_MS,
+                                                self._float_poll)
+
+    def _float_capture(self, text):
+        """接收：同步主窗口输入框（保留记录/预览）→ 按设定方式转换并复制
+        → 显示完成色 2 秒 → 回到常驻监听或熄灭。
+        基线更新为复制完成后的剪贴板内容，防止常驻模式把自己的输出
+        再次当成新内容捕获（防循环）"""
+        self._float_state = 'done'
+        self._draw_float_ball()
+        self._float_last = text
+        self.in_tb.delete('1.0', 'end')
+        self.in_tb.insert('1.0', text)
+        self._schedule()  # 主窗口隐藏时仅后台刷新预览
+        try:
+            if self._float_mode == IMG_LABEL:
+                self.copy_rich_img()
+            elif self._float_mode == ZOTERO_LABEL:
+                self.copy_zotero()
+            elif self._float_mode == PLAIN_LABEL:
+                self.copy_result()
+            else:
+                self.copy_rich()
+            try:  # 以转换后的剪贴板内容为新基线
+                self._float_last = self.root.clipboard_get()
+            except tk.TclError:
+                pass
+        except Exception:
+            pass  # 转换/复制失败不打断悬浮窗（可回主窗口排查）
+        self._float_job = self.root.after(self._FLOAT_DONE_MS,
+                                          self._float_settle)
+
+    def _float_menu(self, e):
+        """右键菜单：复制方式 / 常驻模式 / 三态颜色 / 外观 / 透明度 / 大小 /
+        退出悬浮模式"""
+        m = tk.Menu(self.float_win, tearoff=0)
+        m.add_checkbutton(label='常驻模式（持续监听 Ctrl+C）',
+                          variable=self._float_resident_var)
+        m.add_separator()
+        mm = tk.Menu(m, tearoff=0)
+        for label in AUTO_COPY_MODES:
+            mm.add_radiobutton(label=label, variable=self._float_mode_var,
+                               value=label)
+        m.add_cascade(label='复制方式', menu=mm)
+        cm = tk.Menu(m, tearoff=0)
+        for which, label in (('armed', '点亮待接收色…'),
+                             ('done', '转换完成色…'),
+                             ('resident', '常驻监听色…')):
+            cm.add_command(label=label,
+                           command=lambda w=which: self._float_pick_color(w))
+        m.add_cascade(label='颜色', menu=cm)
+        lm = tk.Menu(m, tearoff=0)
+        lm.add_radiobutton(label='浅色', variable=self._float_light_var,
+                           value=True)
+        lm.add_radiobutton(label='深色', variable=self._float_light_var,
+                           value=False)
+        m.add_cascade(label='外观', menu=lm)
+        am = tk.Menu(m, tearoff=0)
+        for v in (0.4, 0.6, 0.8, 0.9, 1.0):
+            am.add_radiobutton(label=f'{int(v * 100)}%',
+                               variable=self._float_alpha_var, value=v)
+        m.add_cascade(label='透明度', menu=am)
+        sm = tk.Menu(m, tearoff=0)
+        for s in (36, 44, 52, 60, 72):
+            sm.add_radiobutton(label=f'{s} 像素',
+                               variable=self._float_size_var, value=s)
+        m.add_cascade(label='大小', menu=sm)
+        m.add_separator()
+        m.add_command(label='退出悬浮模式（显示主窗口）',
+                      command=self._float_exit)
+        m.tk_popup(e.x_root, e.y_root)
+
+    def _float_apply(self, what):
+        """右键设置变更即时生效并落盘（变量 trace 在窗口销毁期也可能触发，
+        统一吞掉 TclError）"""
+        if not getattr(self, 'float_win', None):
+            return
+        try:
+            if what == 'mode':
+                self._float_mode = self._float_mode_var.get()
+            elif what == 'alpha':
+                self._float_alpha = min(
+                    1.0, max(0.2, float(self._float_alpha_var.get())))
+                try:
+                    self.float_win.attributes('-alpha', self._float_alpha)
+                except tk.TclError:
+                    pass
+            elif what == 'size':
+                self._float_size = int(self._float_size_var.get())
+                self.float_win.geometry(
+                    f'{self._float_size}x{self._float_size}'
+                    f'+{self.float_win.winfo_x()}+{self.float_win.winfo_y()}')
+                self.float_cv.configure(width=self._float_size,
+                                        height=self._float_size)
+                self._float_img_cache.clear()  # 尺寸已变，全部重渲染
+                self._draw_float_ball()
+            elif what == 'light':
+                self._float_light = bool(self._float_light_var.get())
+                self._draw_float_ball()
+            elif what == 'resident':
+                self._float_resident = bool(self._float_resident_var.get())
+                if self._float_resident:
+                    if self._float_state == 'idle':  # 开启：立即开始监听
+                        self._float_settle()
+                else:  # 关闭：监听中则转为熄灭
+                    if self._float_state == 'resident':
+                        self._float_idle()
+            self._float_save()
+        except tk.TclError:
+            pass
+
+    def _float_pick_color(self, which):
+        from tkinter import colorchooser
+        rgb = colorchooser.askcolor(self._float_colors[which],
+                                    parent=self.float_win, title='选择颜色')
+        if rgb and rgb[1]:
+            self._float_colors[which] = rgb[1]
+            self._float_img_cache.clear()  # 颜色已变，全部重渲染
+            self._draw_float_ball()
+            self._float_save()
+
+    def _float_save(self):
+        cfg = _load_config()
+        cfg.update({
+            'float_mode': self._float_mode,
+            'float_colors': self._float_colors,
+            'float_alpha': self._float_alpha,
+            'float_size': self._float_size,
+            'float_light': self._float_light,
+            'float_resident': self._float_resident,
+            'float_pos': [self.float_win.winfo_x(),
+                          self.float_win.winfo_y()],
+        })
+        _save_config(cfg)
+
+    def _float_exit(self):
+        """右键菜单退出：还原菜单勾选并显示主窗口"""
+        self.var_float_win.set(False)
+        self._exit_float_win()
+
+    def _exit_float_win(self):
+        if getattr(self, 'float_win', None):
+            self._float_idle()
+            self._float_save()
+            self.float_win.destroy()
+            self.float_win = None
+        self.root.deiconify()
 
     def copy_rich(self):
         """Markdown → 含 OMML 条件注释的 Office HTML 直写剪贴板（免 Word），

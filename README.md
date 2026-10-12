@@ -8,7 +8,7 @@
 
 Windows 桌面小工具：把 Markdown 转换成适合粘贴进 **OneNote / Word / Zotero Better Notes / 聊天软件** 的格式。
 
-左侧输入 Markdown，右侧实时预览，一键复制。公式可编辑、表格是真表格、列表自动编号，全程**无需安装 Word**。
+左侧输入 Markdown，右侧实时预览，一键复制。公式可编辑、表格是真表格、列表自动编号，全程**无需安装 Word**。更有**悬浮球模式**——任何应用里 Ctrl+C 复制 AI 回答，自动转换到剪贴板，直接去笔记软件粘贴。
 
 ## 功能特性
 
@@ -27,9 +27,20 @@ Windows 桌面小工具：把 Markdown 转换成适合粘贴进 **OneNote / Word
 - **粘贴设置**：菜单「设置 → 粘贴设置」可配置粘贴产物的中文字体、字号、标题字号、是否加粗、段前段后间距，默认**等线 / 12 磅（小四）/ 不加粗**
 - **自动复制**：粘贴设置可勾选开启——输入内容变化（停顿约 0.15 秒）后自动转换并复制到剪贴板，复制方式可选（默认公式可编辑）；启动恢复的内容不会自动复制
 - **底部复制按钮可配置**：粘贴设置中可勾选左下角显示哪几种复制方式（公式可编辑/公式为图片/纯文本/Zotero笔记），默认全部显示，至少保留一种
+- **悬浮球模式**：见下文「悬浮球模式」章节
 - **关于**：菜单「设置 → 关于」查看作者、联系方式与开源地址
-- **内容记忆**：输入内容、窗口大小位置、粘贴设置自动保存，下次启动直接恢复
+- **内容记忆**：输入内容、窗口大小位置、粘贴设置、悬浮球设置自动保存，下次启动直接恢复
 - **内置 Pandoc**：打包内置 pandoc.exe，「公式可编辑」语法覆盖远超内置转换器（矩阵、对齐环境、任务列表、脚注等）
+
+## 悬浮球模式
+
+设置菜单勾选「悬浮窗模式」后，主窗口收起为屏幕上的圆形悬浮球（与程序图标同款的 M↓ 图案）：
+
+- **玻璃质感**：径向渐变球体 + 细描边，4 倍超采样渲染，边缘平滑；整球颜色随状态变化
+- **单击点亮**：球变蓝色待接收，在任意应用里正常 Ctrl+C 复制内容，球自动接收 → 转换 → 复制到剪贴板 → 变绿色提示完成，2 秒后回到待机
+- **常驻模式**：右键菜单勾选后持续监听剪贴板（无需点亮），每次 Ctrl+C 都自动转换复制，监听色/暂停/恢复自由控制；防循环设计——不会把自己转换的输出再次捕获
+- **自定义**：右键菜单可设置复制方式（默认跟随自动复制）、各状态颜色（点亮/完成/常驻）、浅色/深色外观、透明度（40%~100%）、大小（36~72 像素）；自由拖动，位置自动记忆
+- **剪贴板安全**：只读检测不干扰正常复制粘贴；熄灭状态不检测，临时不想被监听单击暂停即可
 
 ## 四种复制模式
 
@@ -49,7 +60,7 @@ Windows 桌面小工具：把 Markdown 转换成适合粘贴进 **OneNote / Word
 ## 安装与运行（源码方式）
 
 ```bash
-pip install latex2mathml mathml2omml matplotlib tkinterdnd2
+pip install latex2mathml mathml2omml matplotlib tkinterdnd2 pillow numpy
 python md_clear.py
 ```
 
@@ -58,12 +69,12 @@ python md_clear.py
 ## 打包成 exe
 
 ```bash
-pip install pyinstaller latex2mathml mathml2omml matplotlib tkinterdnd2
+pip install pyinstaller latex2mathml mathml2omml matplotlib tkinterdnd2 pillow numpy
 # pandoc.exe 放到 pandoc/pandoc.exe 后打包内置
 pyinstaller --noconfirm --onefile --windowed --icon=app.ico --name MdClear --add-binary "pandoc\pandoc.exe;pandoc" --collect-all tkinterdnd2 --collect-data latex2mathml md_clear.py
 ```
 
-生成 `dist/MdClear.exe`（约 79MB），无需 Python 环境即可运行。`app.ico` 为应用图标（窗口/任务栏图标已内嵌在源码中，替换图标时同步更新 `md_clear.py` 里的 `_APP_ICON_B64`）。
+生成 `dist/MdClear.exe`（约 80MB），无需 Python 环境即可运行。`app.ico` 为应用图标（窗口/任务栏图标已内嵌在源码中，替换图标时同步更新 `md_clear.py` 里的 `_APP_ICON_B64`）。
 
 ## 配置文件
 
@@ -72,6 +83,7 @@ pyinstaller --noconfirm --onefile --windowed --icon=app.ico --name MdClear --add
 - 上次输入框内容
 - 窗口大小位置（越界时自动居中）
 - 粘贴设置（字体/字号/标题字号/加粗/段前段后间距/复刻模式）
+- 悬浮球设置（状态颜色/透明度/大小/浅色深色/常驻模式/悬浮位置）
 
 删除该文件即可恢复初始状态。**该文件包含个人输入内容，请勿提交到仓库。**
 
@@ -91,7 +103,8 @@ md2txt_gui/
 - 粘贴到 OneNote 时请使用「**保留源格式粘贴**」，公式与表格才能保持完整格式
 - 左侧输入框支持直接拖入 `.md` / `.txt` 文件
 - 公式从聊天窗口复制时若混入不可见字符（如非断行连字符），程序会自动还原
-- 粘贴到 Zotero Better Notes 请使用「复制（Zotero笔记）」模式
+- 粘贴到 Zotero Better Notes 请使用「复制（Zotero笔记）」模式，在 Better Notes 中直接 Ctrl+V 即可自动渲染
+- 悬浮球常驻模式下复制完即可去笔记软件粘贴；如暂时不想被监听，单击球暂停
 
 ## 技术要点
 
@@ -103,6 +116,7 @@ md2txt_gui/
 - **CF_HTML**：ctypes 直接调 Win32 API 写入 HTML Format + CF_UNICODETEXT 双格式
 - **实时预览**：内置轻量 Markdown 解析器逐块转换，Tk Text 渲染，公式 matplotlib 出图，表格内公式同样渲染
 - **列表压平**：交给 Pandoc 前把列表压平为带转义编号的段落，OneNote 中不出现圆点符号
+- **悬浮球**：PIL 4 倍超采样 + numpy 径向渐变绘制玻璃质感贴图，PNG 透明通道 + Win32 分层窗口（`-transparentcolor`）实现异形鼠标穿透；事件驱动剪贴板轮询（300ms），基线对比防重复捕获，转换输出回写基线防自捕获循环
 
 ## 作者
 
