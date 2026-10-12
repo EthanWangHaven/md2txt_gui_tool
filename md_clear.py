@@ -111,6 +111,9 @@ def _unwrap_code_math_spans(text):
 
 # 网页复制的 AI 笔记里，单字母变量常是裸文本（如 "- B：块大小"、"第j个"），
 # 与 $K_j$ 等真公式混排显得扁平。跳过区：代码块/行内代码/已有公式内部不动
+# 开关默认关闭：部分渲染器（如 Better Notes 的公式配对）对紧邻中文的 $X$
+# 存在闭合符误判，会把多个公式连成大片段；由粘贴设置中的选项驱动
+WRAP_SINGLE_LETTERS = False
 _SKIP_SPAN_RE = re.compile(
     r'```[\s\S]*?(?:```|\Z)'      # 围栏代码块（未闭合也算）
     r'|`[^`\n]+`'                 # 行内代码
@@ -158,8 +161,10 @@ def _wrap_in_prose(seg):
 
 def _wrap_standalone_letters(md):
     """自动识别裸文本单字母变量并包成 $...$（跳过代码块/行内代码/已有公式）；
-    纯英文语境（冠词 a、代词 I、A. 选项标号）因无中文邻接不会命中"""
-    if not re.search(r'[A-Za-z]', md):
+    纯英文语境（冠词 a、代词 I、A. 选项标号）因无中文邻接不会命中。
+    默认关闭（见 WRAP_SINGLE_LETTERS）：部分渲染器对紧邻中文的 $X$ 配对
+    存在缺陷，会把闭合符跳过、与后续公式误配成大片段"""
+    if not WRAP_SINGLE_LETTERS or not re.search(r'[A-Za-z]', md):
         return md
     out = []
     pos = 0
@@ -1408,6 +1413,10 @@ class App:
         if self.var_auto_mode.get() not in AUTO_COPY_MODES:
             self.var_auto_mode.set(RICH_LABEL)
         self._auto_src = None  # 上次自动复制的内容（去重，避免重复写剪贴板）
+        # 单字母变量识别为公式（默认关闭——Better Notes 等渲染器对紧邻
+        # 中文语境的 $X$ 配对有缺陷，详见 WRAP_SINGLE_LETTERS 注释）
+        self.var_wrap_single = tk.BooleanVar(value=bool(cfg.get('wrap_single')))
+        globals()['WRAP_SINGLE_LETTERS'] = self.var_wrap_single.get()
 
         # 文件菜单：打开 / 保存输入 / 保存结果
         menubar = tk.Menu(root)
@@ -1583,6 +1592,7 @@ class App:
             'keep_markdown': self.var_font_keep.get(),
             'auto_copy': self.var_auto_copy.get(),
             'auto_copy_mode': self.var_auto_mode.get(),
+            'wrap_single': self.var_wrap_single.get(),
         })
         self.root.destroy()
 
@@ -1840,7 +1850,8 @@ class App:
                   self.var_head_font.get(), self.var_head_size.get(),
                   self.var_keep_bold.get(), self.var_sp_before.get(),
                   self.var_sp_after.get(), self.var_font_keep.get(),
-                  self.var_auto_copy.get(), self.var_auto_mode.get())
+                  self.var_auto_copy.get(), self.var_auto_mode.get(),
+                  self.var_wrap_single.get())
         win = tk.Toplevel(self.root)
         win.title('粘贴设置')
         win.resizable(False, False)
@@ -1915,15 +1926,21 @@ class App:
 
         self.var_auto_copy.trace_add('write', _sync_auto_state)
         _sync_auto_state()
+        # 单字母变量识别开关（默认关闭；部分渲染器对紧邻中文的 $X$ 配对有缺陷）
+        ck_wrap = ttk.Checkbutton(
+            body, variable=self.var_wrap_single,
+            text='单字母变量识别为公式（B、j 等裸字母自动转 $B$、$j$；'
+                 '若粘贴后公式错位请关闭）')
+        ck_wrap.grid(row=9, column=0, columnspan=4, sticky='w', pady=4)
         ttk.Label(body, foreground='#666',
                   text='对「公式可编辑」「公式为图片」两种复制的粘贴效果生效；'
                        '段前/段后与行距两种模式均生效；'
                        '复刻模式：保留 Word 默认分级字号'
-                  ).grid(row=9, column=0, columnspan=4, sticky='w', pady=(6, 0))
+                  ).grid(row=10, column=0, columnspan=4, sticky='w', pady=(6, 0))
         btns = ttk.Frame(body)
-        btns.grid(row=10, column=0, columnspan=4, sticky='e', pady=(10, 0))
+        btns.grid(row=11, column=0, columnspan=4, sticky='e', pady=(10, 0))
         ttk.Button(btns, text='确定',
-                   command=win.destroy).pack(side='left', padx=4)
+                   command=lambda: self._apply_settings(win)).pack(side='left', padx=4)
         ttk.Button(btns, text='取消',
                    command=lambda: self._restore_settings(backup, win)
                    ).pack(side='left')
@@ -1933,6 +1950,11 @@ class App:
         sw, sh = win.winfo_screenwidth(), win.winfo_screenheight()
         win.geometry(f'+{(sw - w) // 2}+{(sh - h) // 2}')
         win.grab_set()
+
+    def _apply_settings(self, win):
+        """粘贴设置确定：同步模块级开关并关闭弹窗"""
+        globals()['WRAP_SINGLE_LETTERS'] = self.var_wrap_single.get()
+        win.destroy()
 
     def _restore_settings(self, backup, win):
         """设置对话框取消：还原修改前的值"""
@@ -1946,6 +1968,7 @@ class App:
         self.var_font_keep.set(backup[7])
         self.var_auto_copy.set(backup[8])
         self.var_auto_mode.set(backup[9])
+        self.var_wrap_single.set(backup[10])
         win.destroy()
 
     def copy_rich(self):
